@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Phone Drop-off</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Poppins:wght@400;600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="topbar__brand">
+        <div class="brand__mark">B</div>
+        <div class="brand__title">Bravura Lead Retrieval Phone Rentals</div>
+      </div>
+      <div class="topbar__meta" id="activeEvent"></div>
+    </header>
+
+    <main class="container">
+      <section class="card" id="eventsView">
+        <h1 class="h1">Events</h1>
+
+        <div class="row">
+          <input class="input" id="eventName" placeholder="Event name" />
+          <button class="btn btn--primary" id="createEventBtn">Create</button>
+        </div>
+
+        <div class="list" id="eventsList"></div>
+      </section>
+
+      <section class="card hidden" id="eventView">
+        <div class="row row--space">
+          <h1 class="h1" id="eventTitle">Event</h1>
+          <button class="btn" id="backToEventsBtn">Back</button>
+        </div>
+
+        <div class="card card--inner">
+          <h2 class="h2">Import Exhibitors</h2>
+          <div class="row">
+            <input class="input" type="file" id="excelFile" accept=".xls,.xlsx" />
+            <button class="btn btn--primary" id="importBtn">Import</button>
+          </div>
+          <div class="muted" id="importStatus"></div>
+        </div>
+
+        <div class="card card--inner">
+          <div class="row row--space">
+            <h2 class="h2">Exhibitors</h2>
+            <a class="link" id="downloadReport" href="#">Download report (CSV)</a>
+          </div>
+          <div class="list" id="exhibitorsList"></div>
+        </div>
+      </section>
+
+      <section class="sheet hidden" id="actionSheet" aria-hidden="true">
+        <div class="sheet__panel">
+          <div class="row row--space">
+            <div>
+              <div class="h2" id="sheetTitle">Drop-off</div>
+              <div class="muted" id="sheetSub"></div>
+            </div>
+            <button class="btn" id="closeSheetBtn">Close</button>
+          </div>
+
+          <div class="row">
+            <label class="label">
+              Phones to confirm
+              <input class="input" id="confirmPhones" type="number" min="0" />
+            </label>
+            <label class="label">
+              Printed name
+              <input class="input" id="printedName" placeholder="Printed name" />
+            </label>
+          </div>
+
+          <div class="warning hidden" id="discrepancyWarning"></div>
+
+          <label class="label hidden" id="noteLabel">
+            Note (required for mismatches)
+            <textarea class="input textarea" id="noteText" rows="3" placeholder="Explain the discrepancy"></textarea>
+          </label>
+
+          <div class="sig">
+            <div class="sig__header">
+              <div class="label">Signature</div>
+              <button class="btn btn--small" id="clearSigBtn">Clear</button>
+            </div>
+            <canvas id="sigCanvas" class="sig__canvas" width="900" height="320"></canvas>
+            <div class="muted">Sign with a finger or stylus.</div>
+          </div>
+
+          <div class="row row--end">
+            <button class="btn btn--primary" id="saveActionBtn">Save</button>
+          </div>
+
+          <div class="muted" id="actionStatus"></div>
+        </div>
+      </section>
+
+      <section class="sheet hidden" id="passwordSheet" aria-hidden="true">
+        <div class="sheet__panel">
+          <div class="row row--space">
+            <div>
+              <div class="h2" id="passwordTitle">Event Password</div>
+              <div class="muted" id="passwordSub"></div>
+            </div>
+            <button class="btn" id="closePasswordBtn">Close</button>
+          </div>
+
+          <div class="row">
+            <label class="label">
+              Password
+              <input class="input" id="passwordValue" type="password" />
+            </label>
+            <label class="label hidden" id="passwordConfirmLabel">
+              Confirm password
+              <input class="input" id="passwordConfirm" type="password" />
+            </label>
+          </div>
+
+          <div class="row row--end sheet__actions">
+            <button class="btn btn--primary" id="savePasswordBtn">Save</button>
+          </div>
+          <div class="muted" id="passwordStatus"></div>
+        </div>
+      </section>
+
+      <section class="sheet hidden" id="confirmSheet" aria-hidden="true">
+        <div class="sheet__panel">
+          <div class="row row--space">
+            <div>
+              <div class="h2" id="confirmTitle">Confirm</div>
+              <div class="muted" id="confirmMessage"></div>
+            </div>
+            <button class="btn" id="closeConfirmBtn">Close</button>
+          </div>
+
+          <div class="row row--end sheet__actions">
+            <button class="btn" id="confirmCancelBtn">Cancel</button>
+            <button class="btn btn--primary" id="confirmOkBtn">Delete</button>
+          </div>
+          <div class="muted" id="confirmStatus"></div>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
