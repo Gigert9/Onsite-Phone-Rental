@@ -7,6 +7,13 @@ let passwordFlow = null; // { event, mode, resolve, reject }
 let confirmFlow = null; // { title, message, okText, cancelText, onOk }
 
 const $ = (id) => document.getElementById(id);
+const BASE_PATH = window.location.pathname.replace(/\/$/, "");
+
+function withBase(path) {
+  if (!BASE_PATH || BASE_PATH === "/") return path; // running at site root
+  if (path.startsWith("/")) return `${BASE_PATH}${path}`;
+  return `${BASE_PATH}/${path}`;
+}
 
 function show(el, yes) {
   el.classList.toggle("hidden", !yes);
@@ -22,7 +29,7 @@ function setActiveEventHeader() {
 }
 
 async function api(path, options) {
-  const res = await fetch(path, options);
+  const res = await fetch(withBase(path), options);
   if (!res.ok) {
     let msg = `Request failed (${res.status})`;
     try {
