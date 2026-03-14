@@ -5,6 +5,11 @@ let currentExpected = null;
 
 let passwordFlow = null; // { event, mode, resolve, reject }
 let confirmFlow = null; // { title, message, okText, cancelText, onOk }
+let exhibitorFlow = null; // { mode: 'add'|'edit', eventExhibitorId }
+
+let reportsOpen = false;
+
+let signaturesFlow = null; // { eventExhibitorId, displayName }
 
 const $ = (id) => document.getElementById(id);
 const BASE_PATH = window.location.pathname.replace(/\/$/, "");
@@ -17,6 +22,24 @@ function withBase(path) {
 
 function show(el, yes) {
   el.classList.toggle("hidden", !yes);
+}
+
+function onDoubleTap(el, handler, maxDelayMs = 320) {
+  let lastTap = 0;
+  el.addEventListener(
+    "touchend",
+    (e) => {
+      const now = Date.now();
+      if (now - lastTap <= maxDelayMs) {
+        lastTap = 0;
+        e.preventDefault();
+        handler(e);
+        return;
+      }
+      lastTap = now;
+    },
+    { passive: false }
+  );
 }
 
 function setActiveEventHeader() {
@@ -61,6 +84,23 @@ async function apiEvent(eventId, path, options = {}) {
   const headers = new Headers(options.headers || {});
   if (token) headers.set("X-Event-Token", token);
   return await api(path, { ...options, headers });
+}
+
+async function apiEventBlob(eventId, path, options = {}) {
+  const token = getEventToken(eventId);
+  const headers = new Headers(options.headers || {});
+  if (token) headers.set("X-Event-Token", token);
+
+  const res = await fetch(withBase(path), { ...options, headers });
+  if (!res.ok) {
+    let msg = `Request failed (${res.status})`;
+    try {
+      const body = await res.json();
+      msg = body.detail || msg;
+    } catch {}
+    throw new Error(msg);
+  }
+  return await res.blob();
 }
 
 async function loadEvents() {
@@ -169,7 +209,7 @@ async function loadExhibitors() {
   exhibitors = await apiEvent(activeEvent.event_id, `/api/events/${activeEvent.event_id}/exhibitors`);
 
   if (!exhibitors.length) {
-    list.innerHTML = '<div class="muted">No exhibitors yet. Import the Excel file.</div>';
+    list.innerHTML = '<div class="muted">No exhibitors yet. Import the Excel file or add one manually.</div>';
     return;
   }
 
@@ -208,24 +248,236 @@ async function loadExhibitors() {
       );
     }
 
+    const boothText = x.booth ? String(x.booth) : "";
+    const boothSuffix = boothText ? ` / ${boothText}` : "";
+    const sigLinkHtml = x.has_signature ? '<a class="link item__sigLink" href="#">View signatures</a>' : "";
+
     div.innerHTML = `
+      <button class="item__delete" type="button" aria-label="Delete exhibitor" title="Delete">X</button>
       <div>
-        <div class="item__title"></div>
-        <div class="item__meta">${statusBadges.join(" ")}</div>
+        <div class="item__titleRow">
+          <div class="item__title item__name" role="button" tabindex="0" title="Edit exhibitor"></div>
+          <div class="item__booth" role="button" tabindex="0" title="Edit booth"></div>
+        </div>
+        <div class="item__meta">
+          <div class="item__badges">${statusBadges.join("")}</div>
+          ${sigLinkHtml}
+        </div>
       </div>
       <div class="item__right">
         <button class="btn">Drop-off</button>
         <button class="btn">Pick-up</button>
       </div>
     `;
-    div.querySelector(".item__title").textContent = x.display_name;
 
-    const [dropBtn, pickBtn] = div.querySelectorAll("button");
+    const nameEl = div.querySelector(".item__name");
+    const boothEl = div.querySelector(".item__booth");
+    nameEl.textContent = x.name;
+    boothEl.textContent = boothSuffix;
+
+    const delBtn = div.querySelector(".item__delete");
+    const [dropBtn, pickBtn] = div.querySelectorAll(".item__right button");
     dropBtn.addEventListener("click", () => openActionSheet("dropoff", x));
     pickBtn.addEventListener("click", () => openActionSheet("pickup", x));
 
+    const openEdit = () => openExhibitorSheet("edit", x);
+    nameEl.addEventListener("dblclick", openEdit);
+    boothEl.addEventListener("dblclick", openEdit);
+    onDoubleTap(nameEl, openEdit);
+    onDoubleTap(boothEl, openEdit);
+
+    // Front-end guard for clarity; back-end enforces the rule.
+    if (dropoffDone) delBtn.disabled = true;
+    delBtn.addEventListener("click", () => {
+      if (delBtn.disabled) return;
+      confirmDeleteExhibitor(x);
+    });
+
+    const sigLink = div.querySelector(".item__sigLink");
+    if (sigLink) {
+      sigLink.addEventListener("click", (e) => {
+        e.preventDefault();
+        openSignaturesSheet(x);
+      });
+    }
+
     list.appendChild(div);
   }
+}
+
+function openSignaturesSheet(x) {
+  if (!activeEvent) return;
+  signaturesFlow = { eventExhibitorId: x.event_exhibitor_id, displayName: x.display_name };
+  $("signaturesTitle").textContent = "Signatures";
+  $("signaturesSub").textContent = x.display_name;
+  $("signaturesStatus").textContent = "Loading...";
+  $("signaturesList").innerHTML = "";
+
+  const sheet = $("signaturesSheet");
+  show(sheet, true);
+  sheet.setAttribute("aria-hidden", "false");
+
+  loadSignatures().catch((e) => {
+    $("signaturesStatus").textContent = e.message || String(e);
+  });
+}
+
+function closeSignaturesSheet() {
+  signaturesFlow = null;
+  const sheet = $("signaturesSheet");
+  show(sheet, false);
+  sheet.setAttribute("aria-hidden", "true");
+  $("signaturesStatus").textContent = "";
+  $("signaturesList").innerHTML = "";
+}
+
+async function loadSignatures() {
+  if (!activeEvent || !signaturesFlow) return;
+  const list = $("signaturesList");
+  const status = $("signaturesStatus");
+  status.textContent = "";
+
+  const rows = await apiEvent(
+    activeEvent.event_id,
+    `/api/event-exhibitors/${signaturesFlow.eventExhibitorId}/actions`
+  );
+
+  if (!rows.length) {
+    list.innerHTML = '<div class="muted">No signed actions yet.</div>';
+    return;
+  }
+
+  list.innerHTML = "";
+  for (const r of rows) {
+    const div = document.createElement("div");
+    div.className = "item";
+    const typeLabel = r.action_type === "dropoff" ? "Drop-off" : "Pick-up";
+    const when = r.action_at || "";
+    const who = r.printed_name || "";
+    const note = r.note || "";
+    const hasSig = !!r.has_signature;
+
+    div.innerHTML = `
+      <div>
+        <div class="item__title">${typeLabel} • ${r.quantity} phone(s)</div>
+        <div class="item__meta">${when}${who ? ` • ${who}` : ""}${note ? ` • ${note}` : ""}</div>
+      </div>
+      <div class="item__right">
+        <button class="btn btn--small" ${hasSig ? "" : "disabled"}>Open signature</button>
+      </div>
+    `;
+
+    const btn = div.querySelector("button");
+    btn.addEventListener("click", async () => {
+      if (!hasSig) return;
+      try {
+        const blob = await apiEventBlob(activeEvent.event_id, r.signature_url);
+        const url = URL.createObjectURL(blob);
+        window.open(url, "_blank", "noopener,noreferrer");
+        // Let the new tab load; then revoke after a short delay.
+        setTimeout(() => URL.revokeObjectURL(url), 30_000);
+      } catch (e) {
+        status.textContent = e.message || String(e);
+      }
+    });
+
+    list.appendChild(div);
+  }
+}
+
+function openExhibitorSheet(mode, x = null) {
+  if (!activeEvent) return;
+  exhibitorFlow = { mode, eventExhibitorId: x ? x.event_exhibitor_id : null };
+
+  $("exhibitorTitle").textContent = mode === "add" ? "Add Exhibitor" : "Edit Exhibitor";
+  $("exhibitorSub").textContent = activeEvent.name || "";
+  $("exhibitorStatus").textContent = "";
+
+  if (mode === "add") {
+    $("exhibitorName").value = "";
+    $("exhibitorBooth").value = "";
+    $("exhibitorReservedPhones").value = "0";
+  } else {
+    $("exhibitorName").value = x?.name || "";
+    $("exhibitorBooth").value = x?.booth || "";
+    $("exhibitorReservedPhones").value = String(x?.reserved_phones ?? 0);
+  }
+
+  // Only reserved phones is specified for Add; keep it read-only when editing.
+  $("exhibitorReservedPhones").disabled = mode !== "add";
+
+  const sheet = $("exhibitorSheet");
+  show(sheet, true);
+  sheet.setAttribute("aria-hidden", "false");
+  setTimeout(() => $("exhibitorName").focus(), 0);
+}
+
+function closeExhibitorSheet() {
+  exhibitorFlow = null;
+  const sheet = $("exhibitorSheet");
+  show(sheet, false);
+  sheet.setAttribute("aria-hidden", "true");
+  $("exhibitorStatus").textContent = "";
+}
+
+async function saveExhibitor() {
+  if (!activeEvent || !exhibitorFlow) return;
+  const status = $("exhibitorStatus");
+  const name = $("exhibitorName").value.trim();
+  const booth = $("exhibitorBooth").value.trim();
+  const reserved = parseInt($("exhibitorReservedPhones").value, 10);
+
+  if (!name) {
+    status.textContent = "Exhibitor name is required.";
+    return;
+  }
+
+  status.textContent = "Saving...";
+
+  try {
+    if (exhibitorFlow.mode === "add") {
+      if (!Number.isFinite(reserved) || reserved < 0) {
+        status.textContent = "Reserved phones must be a valid number.";
+        return;
+      }
+      await apiEvent(activeEvent.event_id, `/api/events/${activeEvent.event_id}/exhibitors`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          name,
+          booth,
+          reserved_phones: reserved,
+        }),
+      });
+    } else {
+      await apiEvent(activeEvent.event_id, `/api/event-exhibitors/${exhibitorFlow.eventExhibitorId}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, booth }),
+      });
+    }
+
+    closeExhibitorSheet();
+    await loadExhibitors();
+  } catch (e) {
+    status.textContent = e.message;
+  }
+}
+
+function confirmDeleteExhibitor(x) {
+  openConfirmSheet({
+    title: "Delete Exhibitor",
+    message: `Delete “${x.display_name}”? This cannot be undone.`,
+    okText: "Delete",
+    cancelText: "Cancel",
+    onOk: async () => {
+      const status = $("confirmStatus");
+      status.textContent = "Deleting...";
+      await apiEvent(activeEvent.event_id, `/api/event-exhibitors/${x.event_exhibitor_id}`, { method: "DELETE" });
+      closeConfirmSheet();
+      await loadExhibitors();
+    },
+  });
 }
 
 function openActionSheet(type, x) {
@@ -535,27 +787,68 @@ $("clearSigBtn").addEventListener("click", () => sigPad.clear());
 $("saveActionBtn").addEventListener("click", saveAction);
 $("confirmPhones").addEventListener("input", updateDiscrepancyUI);
 
-$("downloadReport").addEventListener("click", async (e) => {
-  e.preventDefault();
+function setReportsMenuOpen(open) {
+  reportsOpen = !!open;
+  const menu = $("reportsMenu");
+  show(menu, reportsOpen);
+  menu.setAttribute("aria-hidden", reportsOpen ? "false" : "true");
+}
+
+$("reportsBtn").addEventListener("click", () => {
+  setReportsMenuOpen(!reportsOpen);
+});
+
+document.addEventListener("click", (e) => {
+  if (!reportsOpen) return;
+  const root = $("reportsDropdown");
+  if (root && !root.contains(e.target)) setReportsMenuOpen(false);
+});
+
+async function downloadCsvReport(path, filenameSuffix) {
   if (!activeEvent) return;
+  const csv = await apiEvent(activeEvent.event_id, path);
+  const blob = new Blob([csv], { type: "text/csv" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  const safeName = String(activeEvent.name || "event").replace(/[^a-z0-9-_]+/gi, "_");
+  a.href = url;
+  a.download = `${safeName}_${filenameSuffix}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+$("downloadHistoryBtn").addEventListener("click", async () => {
   try {
-    const csv = await apiEvent(
-      activeEvent.event_id,
-      `/api/events/${activeEvent.event_id}/report?format=csv`
-    );
-    const blob = new Blob([csv], { type: "text/csv" });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    const safeName = String(activeEvent.name || "event").replace(/[^a-z0-9-_]+/gi, "_");
-    a.href = url;
-    a.download = `${safeName}_report.csv`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
+    setReportsMenuOpen(false);
+    await downloadCsvReport(`/api/events/${activeEvent.event_id}/report?format=csv`, "exhibitor_history");
   } catch (err) {
     alert(err.message || String(err));
   }
+});
+
+$("downloadOverviewBtn").addEventListener("click", async () => {
+  try {
+    setReportsMenuOpen(false);
+    await downloadCsvReport(`/api/events/${activeEvent.event_id}/overview?format=csv`, "exhibitor_overview");
+  } catch (err) {
+    alert(err.message || String(err));
+  }
+});
+
+// --- Exhibitor modal wiring ---
+$("addExhibitorBtn").addEventListener("click", () => openExhibitorSheet("add"));
+$("closeExhibitorBtn").addEventListener("click", closeExhibitorSheet);
+$("exhibitorSheet").addEventListener("click", (e) => {
+  if (e.target === $("exhibitorSheet")) closeExhibitorSheet();
+});
+$("saveExhibitorBtn").addEventListener("click", saveExhibitor);
+
+// --- Signatures modal wiring ---
+$("closeSignaturesBtn").addEventListener("click", closeSignaturesSheet);
+$("signaturesSheet").addEventListener("click", (e) => {
+  if (e.target === $("signaturesSheet")) closeSignaturesSheet();
 });
 
 // --- Confirm modal wiring ---

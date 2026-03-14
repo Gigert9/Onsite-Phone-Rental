@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, File, Header, HTTPException, UploadFile
-from fastapi.responses import FileResponse, PlainTextResponse
+from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import db
@@ -86,6 +86,13 @@ def _decode_data_url_png(data_url: str) -> bytes:
     if "image/png" not in header:
         raise ValueError("Signature must be PNG")
     return base64.b64decode(b64)
+
+
+def _make_display_name(name: str, booth: str | None) -> str:
+    booth_clean = (booth or "").strip() or None
+    if booth_clean:
+        return f"{name} / {booth_clean}"
+    return name
 
 
 @app.get("/api/events")
@@ -281,7 +288,11 @@ def list_event_exhibitors(
             ee.dropoff_note,
             ee.pickup_confirmed_phones,
             ee.pickup_at,
-            ee.pickup_note
+            ee.pickup_note,
+            CASE
+                WHEN ee.dropoff_signature IS NULL AND ee.pickup_signature IS NULL THEN CAST(0 AS bit)
+                ELSE CAST(1 AS bit)
+            END AS has_signature
         FROM dbo.event_exhibitors ee
         JOIN dbo.exhibitors e ON e.exhibitor_id = ee.exhibitor_id
         WHERE ee.event_id = %s
@@ -290,6 +301,273 @@ def list_event_exhibitors(
         (event_id,),
     )
     return rows
+
+
+@app.post("/api/events/{event_id}/exhibitors")
+def add_event_exhibitor(
+    event_id: int,
+    payload: dict[str, Any],
+    x_event_token: str | None = Header(default=None, alias="X-Event-Token"),
+) -> dict[str, Any]:
+    _require_event_token(event_id, x_event_token)
+
+    name = str(payload.get("name") or "").strip()
+    booth = str(payload.get("booth") or "").strip() or None
+    reserved_phones = payload.get("reserved_phones")
+
+    if not name:
+        raise HTTPException(status_code=400, detail="Exhibitor name is required")
+
+    try:
+        reserved_phones_int = int(reserved_phones)
+    except Exception:
+        raise HTTPException(status_code=400, detail="reserved_phones must be an integer")
+    if reserved_phones_int < 0:
+        raise HTTPException(status_code=400, detail="reserved_phones must be >= 0")
+
+    display_name = _make_display_name(name, booth)
+
+    with db.get_conn() as conn:
+        with conn.cursor(as_dict=True) as cur:
+            cur.execute("SELECT event_id FROM dbo.events WHERE event_id=%s", (event_id,))
+            if not cur.fetchone():
+                raise HTTPException(status_code=404, detail="Event not found")
+
+            cur.execute(
+                "SELECT exhibitor_id FROM dbo.exhibitors WHERE name=%s AND ISNULL(booth,'')=ISNULL(%s,'')",
+                (name, booth),
+            )
+            row = cur.fetchone()
+            if row:
+                exhibitor_id = int(row["exhibitor_id"])
+                cur.execute(
+                    "UPDATE dbo.exhibitors SET display_name=%s WHERE exhibitor_id=%s",
+                    (display_name, exhibitor_id),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO dbo.exhibitors (display_name, name, booth)
+                    VALUES (%s,%s,%s);
+                    SELECT CAST(SCOPE_IDENTITY() AS int) AS id;
+                    """,
+                    (display_name, name, booth),
+                )
+                exhibitor_id = int(cur.fetchone()["id"])
+
+            cur.execute(
+                "SELECT event_exhibitor_id FROM dbo.event_exhibitors WHERE event_id=%s AND exhibitor_id=%s",
+                (event_id, exhibitor_id),
+            )
+            if cur.fetchone():
+                raise HTTPException(status_code=409, detail="Exhibitor already exists for this event")
+
+            cur.execute(
+                """
+                INSERT INTO dbo.event_exhibitors (event_id, exhibitor_id, reserved_phones, reserved_licenses)
+                VALUES (%s,%s,%s,NULL);
+                SELECT CAST(SCOPE_IDENTITY() AS int) AS id;
+                """,
+                (event_id, exhibitor_id, reserved_phones_int),
+            )
+            event_exhibitor_id = int(cur.fetchone()["id"])
+
+            cur.execute(
+                """
+                SELECT
+                    ee.event_exhibitor_id,
+                    e.exhibitor_id,
+                    e.display_name,
+                    e.name,
+                    e.booth,
+                    ee.reserved_phones,
+                    ee.dropoff_confirmed_phones,
+                    ee.dropoff_at,
+                    ee.dropoff_note,
+                    ee.pickup_confirmed_phones,
+                    ee.pickup_at,
+                    ee.pickup_note
+                FROM dbo.event_exhibitors ee
+                JOIN dbo.exhibitors e ON e.exhibitor_id = ee.exhibitor_id
+                WHERE ee.event_exhibitor_id=%s
+                """,
+                (event_exhibitor_id,),
+            )
+            created = cur.fetchone()
+
+    if not created:
+        raise HTTPException(status_code=500, detail="Failed to create exhibitor")
+    return created
+
+
+@app.patch("/api/event-exhibitors/{event_exhibitor_id}")
+def update_event_exhibitor(
+    event_exhibitor_id: int,
+    payload: dict[str, Any],
+    x_event_token: str | None = Header(default=None, alias="X-Event-Token"),
+) -> dict[str, Any]:
+    name = str(payload.get("name") or "").strip()
+    booth = str(payload.get("booth") or "").strip() or None
+    if not name:
+        raise HTTPException(status_code=400, detail="Exhibitor name is required")
+    display_name = _make_display_name(name, booth)
+
+    with db.get_conn() as conn:
+        with conn.cursor(as_dict=True) as cur:
+            cur.execute(
+                "SELECT event_id, exhibitor_id FROM dbo.event_exhibitors WHERE event_exhibitor_id=%s",
+                (event_exhibitor_id,),
+            )
+            ee = cur.fetchone()
+            if not ee:
+                raise HTTPException(status_code=404, detail="Record not found")
+            event_id = int(ee["event_id"])
+            _require_event_token(event_id, x_event_token)
+
+            # Find-or-create the target exhibitor row (avoid impacting other events by editing shared rows).
+            cur.execute(
+                "SELECT exhibitor_id FROM dbo.exhibitors WHERE name=%s AND ISNULL(booth,'')=ISNULL(%s,'')",
+                (name, booth),
+            )
+            row = cur.fetchone()
+            if row:
+                new_exhibitor_id = int(row["exhibitor_id"])
+                cur.execute(
+                    "UPDATE dbo.exhibitors SET display_name=%s WHERE exhibitor_id=%s",
+                    (display_name, new_exhibitor_id),
+                )
+            else:
+                cur.execute(
+                    """
+                    INSERT INTO dbo.exhibitors (display_name, name, booth)
+                    VALUES (%s,%s,%s);
+                    SELECT CAST(SCOPE_IDENTITY() AS int) AS id;
+                    """,
+                    (display_name, name, booth),
+                )
+                new_exhibitor_id = int(cur.fetchone()["id"])
+
+            cur.execute(
+                """
+                SELECT event_exhibitor_id
+                FROM dbo.event_exhibitors
+                WHERE event_id=%s AND exhibitor_id=%s AND event_exhibitor_id<>%s
+                """,
+                (event_id, new_exhibitor_id, event_exhibitor_id),
+            )
+            if cur.fetchone():
+                raise HTTPException(status_code=409, detail="Another exhibitor row already uses that name/booth")
+
+            cur.execute(
+                "UPDATE dbo.event_exhibitors SET exhibitor_id=%s WHERE event_exhibitor_id=%s",
+                (new_exhibitor_id, event_exhibitor_id),
+            )
+            if cur.rowcount <= 0:
+                raise HTTPException(status_code=404, detail="Record not found")
+
+            cur.execute(
+                """
+                SELECT
+                    ee.event_exhibitor_id,
+                    e.exhibitor_id,
+                    e.display_name,
+                    e.name,
+                    e.booth,
+                    ee.reserved_phones,
+                    ee.dropoff_confirmed_phones,
+                    ee.dropoff_at,
+                    ee.dropoff_note,
+                    ee.pickup_confirmed_phones,
+                    ee.pickup_at,
+                    ee.pickup_note
+                FROM dbo.event_exhibitors ee
+                JOIN dbo.exhibitors e ON e.exhibitor_id = ee.exhibitor_id
+                WHERE ee.event_exhibitor_id=%s
+                """,
+                (event_exhibitor_id,),
+            )
+            updated = cur.fetchone()
+
+    if not updated:
+        raise HTTPException(status_code=500, detail="Failed to update exhibitor")
+    return updated
+
+
+@app.delete("/api/event-exhibitors/{event_exhibitor_id}")
+def delete_event_exhibitor(
+    event_exhibitor_id: int,
+    x_event_token: str | None = Header(default=None, alias="X-Event-Token"),
+) -> dict[str, Any]:
+    with db.get_conn() as conn:
+        with conn.cursor(as_dict=True) as cur:
+            cur.execute(
+                """
+                SELECT event_id, exhibitor_id, dropoff_confirmed_phones
+                FROM dbo.event_exhibitors
+                WHERE event_exhibitor_id=%s
+                """,
+                (event_exhibitor_id,),
+            )
+            ee = cur.fetchone()
+            if not ee:
+                raise HTTPException(status_code=404, detail="Record not found")
+            event_id = int(ee["event_id"])
+            exhibitor_id = int(ee["exhibitor_id"])
+            dropped = int(ee["dropoff_confirmed_phones"] or 0)
+            _require_event_token(event_id, x_event_token)
+
+            cur.execute(
+                "SELECT COUNT(1) AS cnt FROM dbo.event_exhibitor_actions WHERE event_exhibitor_id=%s",
+                (event_exhibitor_id,),
+            )
+            actions_cnt = int(cur.fetchone()["cnt"])
+            if dropped > 0 or actions_cnt > 0:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Cannot delete exhibitor once any drop-off/pick-up has been recorded",
+                )
+
+            # FK requires actions deleted first (should be none, but keep safe).
+            cur.execute("DELETE FROM dbo.event_exhibitor_actions WHERE event_exhibitor_id=%s", (event_exhibitor_id,))
+            cur.execute("DELETE FROM dbo.event_exhibitors WHERE event_exhibitor_id=%s", (event_exhibitor_id,))
+            if cur.rowcount <= 0:
+                raise HTTPException(status_code=404, detail="Record not found")
+
+            # Optional cleanup: remove orphan exhibitor rows.
+            cur.execute(
+                "SELECT TOP 1 event_exhibitor_id FROM dbo.event_exhibitors WHERE exhibitor_id=%s",
+                (exhibitor_id,),
+            )
+            if not cur.fetchone():
+                cur.execute("DELETE FROM dbo.exhibitors WHERE exhibitor_id=%s", (exhibitor_id,))
+
+    return {"ok": True}
+
+
+@app.get("/api/event-exhibitors/{event_exhibitor_id}/signature/{sig_type}")
+def get_event_exhibitor_signature(
+    event_exhibitor_id: int,
+    sig_type: str,
+    x_event_token: str | None = Header(default=None, alias="X-Event-Token"),
+):
+    sig_type_clean = (sig_type or "").strip().lower()
+    if sig_type_clean not in {"dropoff", "pickup"}:
+        raise HTTPException(status_code=400, detail="sig_type must be dropoff or pickup")
+
+    col = "dropoff_signature" if sig_type_clean == "dropoff" else "pickup_signature"
+    row = db.fetch_one(
+        f"SELECT event_id, {col} AS sig FROM dbo.event_exhibitors WHERE event_exhibitor_id=%s",
+        (event_exhibitor_id,),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Record not found")
+    _require_event_token(int(row["event_id"]), x_event_token)
+
+    sig = row.get("sig")
+    if sig is None:
+        raise HTTPException(status_code=404, detail="Signature not found")
+
+    return Response(content=bytes(sig), media_type="image/png")
 
 
 @app.post("/api/event-exhibitors/{event_exhibitor_id}/dropoff")
@@ -466,6 +744,7 @@ def event_report(
     rows = db.fetch_all(
         """
         SELECT
+            a.action_id,
             ev.name AS event_name,
             e.display_name AS exhibitor_name,
             e.booth AS booth,
@@ -494,6 +773,7 @@ def event_report(
         writer = csv.DictWriter(
             buf,
             fieldnames=[
+                "action_id",
                 "event_name",
                 "exhibitor_name",
                 "booth",
@@ -504,6 +784,7 @@ def event_report(
                 "printed_name",
                 "note",
             ],
+            extrasaction="ignore",
         )
         writer.writeheader()
         for r in rows:
@@ -511,6 +792,120 @@ def event_report(
         return PlainTextResponse(buf.getvalue(), media_type="text/csv")
 
     # Return plain data so FastAPI can JSON-encode datetimes safely.
+    return rows
+
+
+@app.get("/api/events/{event_id}/overview")
+def event_overview_report(
+    event_id: int,
+    format: str = "json",
+    x_event_token: str | None = Header(default=None, alias="X-Event-Token"),
+):
+    _require_event_token(event_id, x_event_token)
+    rows = db.fetch_all(
+        """
+        SELECT
+            ev.name AS event_name,
+            e.display_name AS exhibitor_name,
+            e.booth AS booth,
+            ee.reserved_phones,
+            ISNULL(ee.dropoff_confirmed_phones, 0) AS dropped_off_phones,
+            ISNULL(ee.pickup_confirmed_phones, 0) AS picked_up_phones,
+            ee.dropoff_at,
+            ee.pickup_at
+        FROM dbo.event_exhibitors ee
+        JOIN dbo.events ev ON ev.event_id = ee.event_id
+        JOIN dbo.exhibitors e ON e.exhibitor_id = ee.exhibitor_id
+        WHERE ee.event_id = %s
+        ORDER BY e.display_name ASC
+        """,
+        (event_id,),
+    )
+
+    if format.lower() == "csv":
+        import csv
+        import io
+
+        buf = io.StringIO()
+        writer = csv.DictWriter(
+            buf,
+            fieldnames=[
+                "event_name",
+                "exhibitor_name",
+                "booth",
+                "reserved_phones",
+                "dropped_off_phones",
+                "picked_up_phones",
+                "dropoff_at",
+                "pickup_at",
+            ],
+            extrasaction="ignore",
+        )
+        writer.writeheader()
+        for r in rows:
+            writer.writerow(r)
+        return PlainTextResponse(buf.getvalue(), media_type="text/csv")
+
+    return rows
+
+
+@app.get("/api/event-exhibitor-actions/{action_id}/signature")
+def get_action_signature(
+    action_id: int,
+    x_event_token: str | None = Header(default=None, alias="X-Event-Token"),
+):
+    row = db.fetch_one(
+        """
+        SELECT ee.event_id, a.signature
+        FROM dbo.event_exhibitor_actions a
+        JOIN dbo.event_exhibitors ee ON ee.event_exhibitor_id = a.event_exhibitor_id
+        WHERE a.action_id=%s
+        """,
+        (action_id,),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Record not found")
+    _require_event_token(int(row["event_id"]), x_event_token)
+    sig = row.get("signature")
+    if sig is None:
+        raise HTTPException(status_code=404, detail="Signature not found")
+    return Response(content=bytes(sig), media_type="image/png")
+
+
+@app.get("/api/event-exhibitors/{event_exhibitor_id}/actions")
+def list_event_exhibitor_actions(
+    event_exhibitor_id: int,
+    x_event_token: str | None = Header(default=None, alias="X-Event-Token"),
+) -> list[dict[str, Any]]:
+    row = db.fetch_one(
+        "SELECT event_id FROM dbo.event_exhibitors WHERE event_exhibitor_id=%s",
+        (event_exhibitor_id,),
+    )
+    if not row:
+        raise HTTPException(status_code=404, detail="Record not found")
+    event_id = int(row["event_id"])
+    _require_event_token(event_id, x_event_token)
+
+    rows = db.fetch_all(
+        """
+        SELECT
+            a.action_id,
+            a.action_type,
+            a.quantity,
+            a.action_at,
+            a.printed_name,
+            a.note,
+            CASE WHEN a.signature IS NULL THEN CAST(0 AS bit) ELSE CAST(1 AS bit) END AS has_signature
+        FROM dbo.event_exhibitor_actions a
+        WHERE a.event_exhibitor_id=%s
+        ORDER BY a.action_at ASC, a.action_id ASC
+        """,
+        (event_exhibitor_id,),
+    )
+
+    for r in rows:
+        action_id = r.get("action_id")
+        r["signature_url"] = f"/api/event-exhibitor-actions/{action_id}/signature" if (action_id and r.get("has_signature")) else None
     return rows
 
 

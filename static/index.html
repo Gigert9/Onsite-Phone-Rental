@@ -4,6 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Bravura Onsite Phone Rentals</title>
+    <link rel="icon" type="image/x-icon" href="static/assets/logo.ico" />
+    <link rel="shortcut icon" href="static/assets/logo.ico" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
@@ -15,7 +17,9 @@
   <body>
     <header class="topbar">
       <div class="topbar__brand">
-        <div class="brand__mark">B</div>
+        <div class="brand__mark">
+          <img class="brand__logo" src="static/assets/logo.png" alt="Bravura" />
+        </div>
         <div class="brand__title">Bravura Onsite Phone Rentals</div>
       </div>
       <div class="topbar__meta" id="activeEvent"></div>
@@ -51,9 +55,65 @@
         <div class="card card--inner">
           <div class="row row--space">
             <h2 class="h2">Exhibitors</h2>
-            <a class="link" id="downloadReport" href="#">Download report (CSV)</a>
+            <div class="row">
+              <button class="btn btn--primary" id="addExhibitorBtn">Add exhibitor</button>
+              <div class="dropdown" id="reportsDropdown">
+                <button class="btn" id="reportsBtn" type="button">Reports</button>
+                <div class="dropdown__menu hidden" id="reportsMenu" role="menu" aria-hidden="true">
+                  <button class="dropdown__item" id="downloadHistoryBtn" type="button" role="menuitem">Exhibitor History</button>
+                  <button class="dropdown__item" id="downloadOverviewBtn" type="button" role="menuitem">Exhibitor Overview</button>
+                </div>
+              </div>
+            </div>
           </div>
           <div class="list" id="exhibitorsList"></div>
+        </div>
+      </section>
+
+      <section class="sheet hidden" id="exhibitorSheet" aria-hidden="true">
+        <div class="sheet__panel">
+          <div class="row row--space">
+            <div>
+              <div class="h2" id="exhibitorTitle">Add Exhibitor</div>
+              <div class="muted" id="exhibitorSub"></div>
+            </div>
+            <button class="btn" id="closeExhibitorBtn">Close</button>
+          </div>
+
+          <div class="row">
+            <label class="label">
+              Exhibitor name
+              <input class="input" id="exhibitorName" placeholder="Exhibitor name" />
+            </label>
+            <label class="label">
+              Booth number
+              <input class="input" id="exhibitorBooth" placeholder="Booth" />
+            </label>
+            <label class="label">
+              Reserved phones
+              <input class="input" id="exhibitorReservedPhones" type="number" min="0" />
+            </label>
+          </div>
+
+          <div class="row row--end sheet__actions">
+            <button class="btn btn--primary" id="saveExhibitorBtn">Save</button>
+          </div>
+          <div class="muted" id="exhibitorStatus"></div>
+        </div>
+      </section>
+
+      <section class="sheet hidden" id="signaturesSheet" aria-hidden="true">
+        <div class="sheet__panel">
+          <div class="row row--space">
+            <div>
+              <div class="h2" id="signaturesTitle">Signatures</div>
+              <div class="muted" id="signaturesSub"></div>
+            </div>
+            <button class="btn" id="closeSignaturesBtn">Close</button>
+          </div>
+
+          <div class="list" id="signaturesList"></div>
+          <div class="muted" id="signaturesStatus"></div>
         </div>
       </section>
 
