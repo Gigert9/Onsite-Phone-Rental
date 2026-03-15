@@ -138,6 +138,29 @@
             </label>
           </div>
 
+          <label class="label" id="phoneIdsLabel">
+            Phone ID numbers
+            <textarea class="input textarea" id="phoneIdsText" rows="3" placeholder="Enter phone ID numbers (one per line)"></textarea>
+          </label>
+
+          <div class="row" id="dropoffChargerRow">
+            <label class="label" style="min-width: 180px; flex: 0 0 auto;">
+              Charger dropped off?
+              <input id="chargerIncluded" type="checkbox" />
+            </label>
+            <label class="label" id="chargerQtyLabel">
+              Chargers quantity
+              <input class="input" id="chargerQty" type="number" min="0" />
+            </label>
+          </div>
+
+          <div class="row hidden" id="pickupChargerRow">
+            <label class="label">
+              Chargers to confirm
+              <input class="input" id="confirmChargers" type="number" min="0" />
+            </label>
+          </div>
+
           <div class="warning hidden" id="discrepancyWarning"></div>
 
           <label class="label hidden" id="noteLabel">

@@ -129,6 +129,8 @@ BEGIN
         action_at datetime2(0) NOT NULL CONSTRAINT DF_event_exhibitor_actions_action_at DEFAULT (sysutcdatetime()),
         printed_name nvarchar(200) NULL,
         signature varbinary(max) NULL,
+        phone_ids nvarchar(max) NULL,
+        charger_qty int NULL,
         note nvarchar(1000) NULL,
 
         CONSTRAINT FK_event_exhibitor_actions_event_exhibitor
@@ -151,5 +153,24 @@ BEGIN
 
     IF COL_LENGTH('dbo.event_exhibitors', 'pickup_note') IS NULL
         ALTER TABLE dbo.event_exhibitors ADD pickup_note nvarchar(1000) NULL;
+
+    IF COL_LENGTH('dbo.event_exhibitors', 'dropoff_phone_ids') IS NULL
+        ALTER TABLE dbo.event_exhibitors ADD dropoff_phone_ids nvarchar(max) NULL;
+
+    IF COL_LENGTH('dbo.event_exhibitors', 'dropoff_confirmed_chargers') IS NULL
+        ALTER TABLE dbo.event_exhibitors ADD dropoff_confirmed_chargers int NULL;
+
+    IF COL_LENGTH('dbo.event_exhibitors', 'pickup_confirmed_chargers') IS NULL
+        ALTER TABLE dbo.event_exhibitors ADD pickup_confirmed_chargers int NULL;
+END
+GO
+
+IF OBJECT_ID(N'dbo.event_exhibitor_actions', N'U') IS NOT NULL
+BEGIN
+    IF COL_LENGTH('dbo.event_exhibitor_actions', 'phone_ids') IS NULL
+        ALTER TABLE dbo.event_exhibitor_actions ADD phone_ids nvarchar(max) NULL;
+
+    IF COL_LENGTH('dbo.event_exhibitor_actions', 'charger_qty') IS NULL
+        ALTER TABLE dbo.event_exhibitor_actions ADD charger_qty int NULL;
 END
 GO

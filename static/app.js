@@ -504,6 +504,39 @@ function openActionSheet(type, x) {
   $("noteText").value = "";
   $("actionStatus").textContent = "";
 
+  // Phone IDs: editable only on drop-off; auto-populated on pick-up.
+  const idsEl = $("phoneIdsText");
+  if (type === "dropoff") {
+    idsEl.readOnly = false;
+    idsEl.value = "";
+  } else {
+    idsEl.readOnly = true;
+    idsEl.value = (x.dropoff_phone_ids || "").trim();
+  }
+
+  // Chargers
+  const hasChargerInfo = typeof x.dropoff_confirmed_chargers !== "undefined";
+  const dropRow = $("dropoffChargerRow");
+  const pickRow = $("pickupChargerRow");
+  const chargerIncluded = $("chargerIncluded");
+  const chargerQty = $("chargerQty");
+  const confirmChargers = $("confirmChargers");
+
+  if (type === "dropoff") {
+    show(dropRow, true);
+    show(pickRow, false);
+    chargerIncluded.checked = false;
+    chargerQty.value = "0";
+    chargerQty.disabled = true;
+  } else {
+    show(dropRow, false);
+    show(pickRow, hasChargerInfo);
+    const expectedCh = x.dropoff_confirmed_chargers != null ? x.dropoff_confirmed_chargers : 0;
+    const alreadyCh = x.pickup_confirmed_chargers != null ? x.pickup_confirmed_chargers : 0;
+    const remainingCh = Math.max(0, expectedCh - alreadyCh);
+    confirmChargers.value = String(remainingCh);
+  }
+
   updateDiscrepancyUI();
   const sheet = $("actionSheet");
   show(sheet, true);
@@ -516,6 +549,14 @@ function openActionSheet(type, x) {
     sigPad.clear();
   });
 }
+
+$("chargerIncluded").addEventListener("change", () => {
+  const checked = $("chargerIncluded").checked;
+  const qty = $("chargerQty");
+  qty.disabled = !checked;
+  if (!checked) qty.value = "0";
+  if (checked && (!qty.value || qty.value === "0")) qty.value = "1";
+});
 
 function updateDiscrepancyUI() {
   if (!currentAction) return;
@@ -588,6 +629,7 @@ async function saveAction() {
   const confirmed = parseInt($("confirmPhones").value, 10);
   const printedName = $("printedName").value.trim();
   const note = $("noteText").value.trim();
+  const phoneIds = $("phoneIdsText").value.trim();
 
   if (!Number.isFinite(confirmed) || confirmed < 0) {
     status.textContent = "Please enter a valid phone count.";
@@ -613,15 +655,41 @@ async function saveAction() {
   status.textContent = "Saving...";
 
   try {
+    const payload = {
+      confirmed_phones: confirmed,
+      printed_name: printedName,
+      signature: sigPad.toDataURL(),
+      note,
+    };
+
+    if (currentAction.type === "dropoff") {
+      if (confirmed > 0) {
+        if (!phoneIds) {
+          status.textContent = "Phone ID numbers are required when dropping off phones.";
+          return;
+        }
+        const parts = phoneIds
+          .split(/[\r\n,;]+/)
+          .map((s) => s.trim())
+          .filter(Boolean);
+        if (parts.length !== confirmed) {
+          status.textContent = `Please provide exactly ${confirmed} phone ID number(s). Got ${parts.length}.`;
+          return;
+        }
+      }
+
+      payload.phone_ids = phoneIds;
+      payload.charger_included = $("chargerIncluded").checked;
+      payload.charger_qty = parseInt($("chargerQty").value, 10);
+    } else {
+      const c = parseInt($("confirmChargers").value, 10);
+      if (Number.isFinite(c) && c >= 0) payload.confirmed_chargers = c;
+    }
+
     await apiEvent(activeEvent.event_id, `/api/event-exhibitors/${currentAction.eventExhibitorId}/${currentAction.type}`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        confirmed_phones: confirmed,
-        printed_name: printedName,
-        signature: sigPad.toDataURL(),
-        note,
-      }),
+      body: JSON.stringify(payload),
     });
 
     status.textContent = "Saved.";

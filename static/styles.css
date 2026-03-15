@@ -109,6 +109,10 @@ body {
   flex-wrap: wrap;
 }
 
+textarea.input {
+  font-family: inherit;
+}
+
 .row--space {
   justify-content: space-between;
   align-items: center;

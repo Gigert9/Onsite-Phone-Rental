@@ -29,6 +29,23 @@ PBKDF2_HASH_NAME = "sha256"
 # In-memory unlock tokens: { (event_id, token): expires_epoch }
 _EVENT_TOKENS: dict[tuple[int, str], float] = {}
 
+# Cache DB column support checks to avoid extra round-trips.
+_COL_SUPPORT: dict[tuple[str, str], bool] = {}
+
+
+def _db_has_column(table: str, column: str) -> bool:
+    key = (table.lower(), column.lower())
+    if key in _COL_SUPPORT:
+        return _COL_SUPPORT[key]
+    # COL_LENGTH returns NULL when column doesn't exist.
+    row = db.fetch_one(
+        "SELECT CASE WHEN COL_LENGTH(%s, %s) IS NULL THEN 0 ELSE 1 END AS has_col",
+        (table, column),
+    )
+    ok = bool(row and int(row.get("has_col") or 0) == 1)
+    _COL_SUPPORT[key] = ok
+    return ok
+
 
 def _clean_expired_tokens(now: float | None = None) -> None:
     ts = now if now is not None else time.time()
@@ -274,8 +291,29 @@ def list_event_exhibitors(
     x_event_token: str | None = Header(default=None, alias="X-Event-Token"),
 ) -> list[dict[str, Any]]:
     _require_event_token(event_id, x_event_token)
+
+    has_sig_snapshot = _db_has_column("dbo.event_exhibitors", "dropoff_signature") and _db_has_column(
+        "dbo.event_exhibitors", "pickup_signature"
+    )
+    has_phone_ids = _db_has_column("dbo.event_exhibitors", "dropoff_phone_ids")
+    has_chargers = _db_has_column("dbo.event_exhibitors", "dropoff_confirmed_chargers") and _db_has_column(
+        "dbo.event_exhibitors", "pickup_confirmed_chargers"
+    )
+
+    extra_cols: list[str] = []
+    if has_phone_ids:
+        extra_cols.append("ee.dropoff_phone_ids")
+    if has_chargers:
+        extra_cols.append("ee.dropoff_confirmed_chargers")
+        extra_cols.append("ee.pickup_confirmed_chargers")
+    if has_sig_snapshot:
+        extra_cols.append(
+            "CASE WHEN ee.dropoff_signature IS NULL AND ee.pickup_signature IS NULL THEN CAST(0 AS bit) ELSE CAST(1 AS bit) END AS has_signature"
+        )
+    select_extra = (",\n            " + ",\n            ".join(extra_cols)) if extra_cols else ""
+
     rows = db.fetch_all(
-        """
+        f"""
         SELECT
             ee.event_exhibitor_id,
             e.exhibitor_id,
@@ -288,11 +326,8 @@ def list_event_exhibitors(
             ee.dropoff_note,
             ee.pickup_confirmed_phones,
             ee.pickup_at,
-            ee.pickup_note,
-            CASE
-                WHEN ee.dropoff_signature IS NULL AND ee.pickup_signature IS NULL THEN CAST(0 AS bit)
-                ELSE CAST(1 AS bit)
-            END AS has_signature
+            ee.pickup_note
+            {select_extra}
         FROM dbo.event_exhibitors ee
         JOIN dbo.exhibitors e ON e.exhibitor_id = ee.exhibitor_id
         WHERE ee.event_id = %s
@@ -580,6 +615,10 @@ def dropoff(
     printed_name = str(payload.get("printed_name") or "").strip()
     signature = str(payload.get("signature") or "").strip()
     note = str(payload.get("note") or "").strip()
+    phone_ids = str(payload.get("phone_ids") or "").strip()
+
+    charger_included = bool(payload.get("charger_included") or False)
+    charger_qty_raw = payload.get("charger_qty")
 
     try:
         confirmed_int = int(confirmed)
@@ -590,6 +629,34 @@ def dropoff(
         raise HTTPException(status_code=400, detail="confirmed_phones must be >= 0")
     if not printed_name:
         raise HTTPException(status_code=400, detail="Printed name is required")
+
+    has_parent_phone_ids = _db_has_column("dbo.event_exhibitors", "dropoff_phone_ids")
+    if confirmed_int > 0:
+        if not phone_ids:
+            raise HTTPException(status_code=400, detail="Phone ID numbers are required when dropping off phones")
+        # Accept one-per-line, but also tolerate comma/semicolon separation.
+        import re
+
+        parsed_ids = [t.strip() for t in re.split(r"[\r\n,;]+", phone_ids) if t and t.strip()]
+        if len(parsed_ids) != confirmed_int:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Please provide exactly {confirmed_int} phone ID number(s). Got {len(parsed_ids)}.",
+            )
+        if not has_parent_phone_ids:
+            raise HTTPException(
+                status_code=409,
+                detail="Database is missing dropoff_phone_ids column. Please run database/setup.sql schema upgrades.",
+            )
+
+    charger_qty: int = 0
+    if charger_included:
+        try:
+            charger_qty = int(charger_qty_raw)
+        except Exception:
+            raise HTTPException(status_code=400, detail="charger_qty must be an integer")
+        if charger_qty <= 0:
+            raise HTTPException(status_code=400, detail="charger_qty must be >= 1 when charger_included is true")
 
     row = db.fetch_one(
         """
@@ -621,30 +688,63 @@ def dropoff(
 
     now = _utc_now()
 
+    has_action_phone_ids = _db_has_column("dbo.event_exhibitor_actions", "phone_ids")
+    has_action_charger_qty = _db_has_column("dbo.event_exhibitor_actions", "charger_qty")
+    has_parent_chargers = _db_has_column("dbo.event_exhibitors", "dropoff_confirmed_chargers")
+
     with db.get_conn() as conn:
         with conn.cursor() as cur:
             # Insert signed action record
+            cols = ["event_exhibitor_id", "action_type", "quantity", "action_at", "printed_name", "signature", "note"]
+            vals: list[Any] = [event_exhibitor_id, "dropoff", confirmed_int, now, printed_name, sig_bytes, note or None]
+            if has_action_phone_ids:
+                cols.insert(6, "phone_ids")
+                vals.insert(6, phone_ids or None)
+            if has_action_charger_qty:
+                cols.insert(6, "charger_qty")
+                vals.insert(6, charger_qty if charger_included else None)
+
+            placeholders = ", ".join(["%s"] * len(cols))
+            col_sql = ", ".join(cols)
             cur.execute(
-                """
-                INSERT INTO dbo.event_exhibitor_actions
-                    (event_exhibitor_id, action_type, quantity, action_at, printed_name, signature, note)
-                VALUES (%s, N'dropoff', %s, %s, %s, %s, %s)
-                """,
-                (event_exhibitor_id, confirmed_int, now, printed_name, sig_bytes, note or None),
+                f"INSERT INTO dbo.event_exhibitor_actions ({col_sql}) VALUES ({placeholders})",
+                tuple(vals),
             )
 
             # Update fast-path totals + keep last-action snapshot on the parent row.
+            update_sets = [
+                "dropoff_confirmed_phones=%s",
+                "dropoff_at=%s",
+                "dropoff_printed_name=%s",
+                "dropoff_signature=%s",
+                "dropoff_note=%s",
+            ]
+            update_vals: list[Any] = [new_total, now, printed_name, sig_bytes, note or None]
+
+            if has_parent_phone_ids and phone_ids:
+                prev = db.fetch_one(
+                    "SELECT dropoff_phone_ids FROM dbo.event_exhibitors WHERE event_exhibitor_id=%s",
+                    (event_exhibitor_id,),
+                )
+                prev_txt = str((prev or {}).get("dropoff_phone_ids") or "").strip()
+                combined = phone_ids if not prev_txt else (prev_txt if phone_ids in prev_txt else (prev_txt + "\n" + phone_ids))
+                update_sets.append("dropoff_phone_ids=%s")
+                update_vals.append(combined)
+
+            if has_parent_chargers:
+                prev_c = db.fetch_one(
+                    "SELECT dropoff_confirmed_chargers FROM dbo.event_exhibitors WHERE event_exhibitor_id=%s",
+                    (event_exhibitor_id,),
+                )
+                prev_ch = int((prev_c or {}).get("dropoff_confirmed_chargers") or 0)
+                new_ch = prev_ch + (charger_qty if charger_included else 0)
+                update_sets.append("dropoff_confirmed_chargers=%s")
+                update_vals.append(new_ch)
+
+            update_vals.append(event_exhibitor_id)
             cur.execute(
-                """
-                UPDATE dbo.event_exhibitors
-                SET dropoff_confirmed_phones=%s,
-                    dropoff_at=%s,
-                    dropoff_printed_name=%s,
-                    dropoff_signature=%s,
-                    dropoff_note=%s
-                WHERE event_exhibitor_id=%s
-                """,
-                (new_total, now, printed_name, sig_bytes, note or None, event_exhibitor_id),
+                f"UPDATE dbo.event_exhibitors SET {', '.join(update_sets)} WHERE event_exhibitor_id=%s",
+                tuple(update_vals),
             )
             if cur.rowcount <= 0:
                 raise HTTPException(status_code=404, detail="Record not found")
@@ -662,6 +762,7 @@ def pickup(
     printed_name = str(payload.get("printed_name") or "").strip()
     signature = str(payload.get("signature") or "").strip()
     note = str(payload.get("note") or "").strip()
+    confirmed_chargers_raw = payload.get("confirmed_chargers")
 
     try:
         confirmed_int = int(confirmed)
@@ -672,6 +773,15 @@ def pickup(
         raise HTTPException(status_code=400, detail="confirmed_phones must be >= 0")
     if not printed_name:
         raise HTTPException(status_code=400, detail="Printed name is required")
+
+    confirmed_chargers = 0
+    if confirmed_chargers_raw is not None:
+        try:
+            confirmed_chargers = int(confirmed_chargers_raw)
+        except Exception:
+            raise HTTPException(status_code=400, detail="confirmed_chargers must be an integer")
+        if confirmed_chargers < 0:
+            raise HTTPException(status_code=400, detail="confirmed_chargers must be >= 0")
 
     row = db.fetch_one(
         """
@@ -704,28 +814,62 @@ def pickup(
 
     now = _utc_now()
 
-    with db.get_conn() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                INSERT INTO dbo.event_exhibitor_actions
-                    (event_exhibitor_id, action_type, quantity, action_at, printed_name, signature, note)
-                VALUES (%s, N'pickup', %s, %s, %s, %s, %s)
-                """,
-                (event_exhibitor_id, confirmed_int, now, printed_name, sig_bytes, note or None),
+    has_action_charger_qty = _db_has_column("dbo.event_exhibitor_actions", "charger_qty")
+    has_parent_chargers = _db_has_column("dbo.event_exhibitors", "pickup_confirmed_chargers")
+    expected_chargers = 0
+    if has_parent_chargers:
+        exp_row = db.fetch_one(
+            "SELECT dropoff_confirmed_chargers, pickup_confirmed_chargers FROM dbo.event_exhibitors WHERE event_exhibitor_id=%s",
+            (event_exhibitor_id,),
+        )
+        expected_chargers = int((exp_row or {}).get("dropoff_confirmed_chargers") or 0)
+        prev_pick_ch = int((exp_row or {}).get("pickup_confirmed_chargers") or 0)
+        if prev_pick_ch + confirmed_chargers > expected_chargers and not note:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Discrepancy: expected charger pick-up {expected_chargers}, already picked up {prev_pick_ch}, "
+                    f"picking up {confirmed_chargers} (new total {prev_pick_ch + confirmed_chargers}). Note is required to continue."
+                ),
             )
 
+    with db.get_conn() as conn:
+        with conn.cursor() as cur:
+            cols = ["event_exhibitor_id", "action_type", "quantity", "action_at", "printed_name", "signature", "note"]
+            vals: list[Any] = [event_exhibitor_id, "pickup", confirmed_int, now, printed_name, sig_bytes, note or None]
+            if has_action_charger_qty:
+                cols.insert(6, "charger_qty")
+                vals.insert(6, confirmed_chargers if confirmed_chargers > 0 else None)
+
+            placeholders = ", ".join(["%s"] * len(cols))
+            col_sql = ", ".join(cols)
             cur.execute(
-                """
-                UPDATE dbo.event_exhibitors
-                SET pickup_confirmed_phones=%s,
-                    pickup_at=%s,
-                    pickup_printed_name=%s,
-                    pickup_signature=%s,
-                    pickup_note=%s
-                WHERE event_exhibitor_id=%s
-                """,
-                (new_total, now, printed_name, sig_bytes, note or None, event_exhibitor_id),
+                f"INSERT INTO dbo.event_exhibitor_actions ({col_sql}) VALUES ({placeholders})",
+                tuple(vals),
+            )
+
+            update_sets = [
+                "pickup_confirmed_phones=%s",
+                "pickup_at=%s",
+                "pickup_printed_name=%s",
+                "pickup_signature=%s",
+                "pickup_note=%s",
+            ]
+            update_vals: list[Any] = [new_total, now, printed_name, sig_bytes, note or None]
+
+            if has_parent_chargers:
+                exp_row = db.fetch_one(
+                    "SELECT pickup_confirmed_chargers FROM dbo.event_exhibitors WHERE event_exhibitor_id=%s",
+                    (event_exhibitor_id,),
+                )
+                prev_pick_ch = int((exp_row or {}).get("pickup_confirmed_chargers") or 0)
+                update_sets.append("pickup_confirmed_chargers=%s")
+                update_vals.append(prev_pick_ch + confirmed_chargers)
+
+            update_vals.append(event_exhibitor_id)
+            cur.execute(
+                f"UPDATE dbo.event_exhibitors SET {', '.join(update_sets)} WHERE event_exhibitor_id=%s",
+                tuple(update_vals),
             )
             if cur.rowcount <= 0:
                 raise HTTPException(status_code=404, detail="Record not found")
