@@ -43,6 +43,10 @@
           <button class="btn" id="backToEventsBtn">Back</button>
         </div>
 
+        <div class="eventTotals" aria-label="Event phone totals">
+          <div class="item__badges" id="eventTotals"></div>
+        </div>
+
         <div class="card card--inner">
           <h2 class="h2">Import Exhibitors</h2>
           <div class="row">
@@ -121,7 +125,7 @@
         <div class="sheet__panel">
           <div class="row row--space">
             <div>
-              <div class="h2" id="sheetTitle">Drop-off</div>
+              <div class="h2" id="sheetTitle">Sign Out</div>
               <div class="muted" id="sheetSub"></div>
             </div>
             <button class="btn" id="closeSheetBtn">Close</button>
@@ -145,7 +149,7 @@
 
           <div class="row" id="dropoffChargerRow">
             <label class="label" style="min-width: 180px; flex: 0 0 auto;">
-              Charger dropped off?
+              Charger signed out?
               <input id="chargerIncluded" type="checkbox" />
             </label>
             <label class="label" id="chargerQtyLabel">
@@ -156,7 +160,7 @@
 
           <div class="row hidden" id="pickupChargerRow">
             <label class="label">
-              Chargers to confirm
+              Chargers to sign in
               <input class="input" id="confirmChargers" type="number" min="0" />
             </label>
           </div>

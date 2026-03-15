@@ -11,6 +11,36 @@ let reportsOpen = false;
 
 let signaturesFlow = null; // { eventExhibitorId, displayName }
 
+function labelForActionType(type) {
+  return type === "dropoff" ? "Sign Out" : "Sign In";
+}
+
+function labelPastTense(type) {
+  return type === "dropoff" ? "Signed Out" : "Signed In";
+}
+
+function setEventTotals(rows) {
+  const el = $("eventTotals");
+  if (!el) return;
+
+  const safeRows = Array.isArray(rows) ? rows : [];
+  let reserved = 0;
+  let signedOut = 0;
+  let signedIn = 0;
+
+  for (const x of safeRows) {
+    reserved += Number(x?.reserved_phones || 0);
+    signedOut += Number(x?.dropoff_confirmed_phones || 0);
+    signedIn += Number(x?.pickup_confirmed_phones || 0);
+  }
+
+  el.innerHTML = [
+    `<span class="badge">Reserved: ${reserved}</span>`,
+    `<span class="badge">Signed Out: ${signedOut}</span>`,
+    `<span class="badge">Signed In: ${signedIn}</span>`,
+  ].join("");
+}
+
 const $ = (id) => document.getElementById(id);
 const BASE_PATH = window.location.pathname.replace(/\/$/, "");
 
@@ -208,6 +238,8 @@ async function loadExhibitors() {
   list.textContent = "Loading...";
   exhibitors = await apiEvent(activeEvent.event_id, `/api/events/${activeEvent.event_id}/exhibitors`);
 
+  setEventTotals(exhibitors);
+
   if (!exhibitors.length) {
     list.innerHTML = '<div class="muted">No exhibitors yet. Import the Excel file or add one manually.</div>';
     return;
@@ -231,20 +263,20 @@ async function loadExhibitors() {
     statusBadges.push(`<span class="badge">Reserved: ${x.reserved_phones}</span>`);
 
     if (!dropoffDone) {
-      statusBadges.push(`<span class="badge">Dropped Off: -/${x.reserved_phones}</span>`);
+      statusBadges.push(`<span class="badge">Signed Out: -/${x.reserved_phones}</span>`);
     } else {
       const dropMismatch = dropoffTotal > x.reserved_phones;
       statusBadges.push(
-        `<span class="badge ${dropMismatch ? "badge--warn" : ""}">Dropped Off: ${dropoffTotal}/${x.reserved_phones}</span>`
+        `<span class="badge ${dropMismatch ? "badge--warn" : ""}">Signed Out: ${dropoffTotal}/${x.reserved_phones}</span>`
       );
     }
 
     if (!pickupTotal) {
-      statusBadges.push(`<span class="badge">Picked up: -/${expectedPickup}</span>`);
+      statusBadges.push(`<span class="badge">Signed In: -/${expectedPickup}</span>`);
     } else {
       const pickMismatch = pickupTotal > expectedPickup;
       statusBadges.push(
-        `<span class="badge ${pickMismatch ? "badge--warn" : ""}">Picked up: ${pickupTotal}/${expectedPickup}</span>`
+        `<span class="badge ${pickMismatch ? "badge--warn" : ""}">Signed In: ${pickupTotal}/${expectedPickup}</span>`
       );
     }
 
@@ -265,8 +297,8 @@ async function loadExhibitors() {
         </div>
       </div>
       <div class="item__right">
-        <button class="btn">Drop-off</button>
-        <button class="btn">Pick-up</button>
+        <button class="btn">Sign Out</button>
+        <button class="btn">Sign In</button>
       </div>
     `;
 
@@ -351,7 +383,7 @@ async function loadSignatures() {
   for (const r of rows) {
     const div = document.createElement("div");
     div.className = "item";
-    const typeLabel = r.action_type === "dropoff" ? "Drop-off" : "Pick-up";
+    const typeLabel = labelForActionType(r.action_type);
     const when = r.action_at || "";
     const who = r.printed_name || "";
     const note = r.note || "";
@@ -495,16 +527,16 @@ function openActionSheet(type, x) {
   const already = type === "dropoff" ? (x.dropoff_confirmed_phones || 0) : (x.pickup_confirmed_phones || 0);
   const remaining = Math.max(0, currentExpected - already);
 
-  $("sheetTitle").textContent = type === "dropoff" ? "Drop-off" : "Pick-up";
-  const expectedLabel = type === "dropoff" ? "Reserved" : "Expected pick-up";
-  const alreadyLabel = type === "dropoff" ? "Already dropped off" : "Already picked up";
+  $("sheetTitle").textContent = labelForActionType(type);
+  const expectedLabel = type === "dropoff" ? "Reserved" : "Expected sign in";
+  const alreadyLabel = type === "dropoff" ? "Already signed out" : "Already signed in";
   $("sheetSub").textContent = `${x.display_name} • Reserved: ${x.reserved_phones} • ${expectedLabel}: ${currentExpected} • ${alreadyLabel}: ${already}`;
   $("confirmPhones").value = String(remaining > 0 ? remaining : 1);
   $("printedName").value = "";
   $("noteText").value = "";
   $("actionStatus").textContent = "";
 
-  // Phone IDs: editable only on drop-off; auto-populated on pick-up.
+  // Phone IDs: editable only on sign out; auto-populated on sign in.
   const idsEl = $("phoneIdsText");
   if (type === "dropoff") {
     idsEl.readOnly = false;
@@ -665,7 +697,7 @@ async function saveAction() {
     if (currentAction.type === "dropoff") {
       if (confirmed > 0) {
         if (!phoneIds) {
-          status.textContent = "Phone ID numbers are required when dropping off phones.";
+          status.textContent = "Phone ID numbers are required when signing out phones.";
           return;
         }
         const parts = phoneIds

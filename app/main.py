@@ -19,7 +19,7 @@ from .excel_import import parse_totali_phone_rentals_xls
 APP_ROOT = Path(__file__).resolve().parents[1]
 STATIC_DIR = APP_ROOT / "static"
 
-app = FastAPI(title="Onsite Leads Phone Dropoff")
+app = FastAPI(title="Onsite Leads Phone Sign In/Out")
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 
@@ -559,7 +559,7 @@ def delete_event_exhibitor(
             if dropped > 0 or actions_cnt > 0:
                 raise HTTPException(
                     status_code=409,
-                    detail="Cannot delete exhibitor once any drop-off/pick-up has been recorded",
+                    detail="Cannot delete exhibitor once any sign out/sign in has been recorded",
                 )
 
             # FK requires actions deleted first (should be none, but keep safe).
@@ -676,8 +676,8 @@ def dropoff(
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Discrepancy: reserved {expected}, already dropped off {prev_total}, "
-                f"dropping off {confirmed_int} (new total {new_total}). Note is required to continue."
+                f"Discrepancy: reserved {expected}, already signed out {prev_total}, "
+                f"signing out {confirmed_int} (new total {new_total}). Note is required to continue."
             ),
         )
 
@@ -802,8 +802,8 @@ def pickup(
         raise HTTPException(
             status_code=400,
             detail=(
-                f"Discrepancy: expected pick-up {expected}, already picked up {prev_total}, "
-                f"picking up {confirmed_int} (new total {new_total}). Note is required to continue."
+                f"Discrepancy: expected sign in {expected}, already signed in {prev_total}, "
+                f"signing in {confirmed_int} (new total {new_total}). Note is required to continue."
             ),
         )
 
@@ -828,8 +828,8 @@ def pickup(
             raise HTTPException(
                 status_code=400,
                 detail=(
-                    f"Discrepancy: expected charger pick-up {expected_chargers}, already picked up {prev_pick_ch}, "
-                    f"picking up {confirmed_chargers} (new total {prev_pick_ch + confirmed_chargers}). Note is required to continue."
+                    f"Discrepancy: expected charger sign in {expected_chargers}, already signed in {prev_pick_ch}, "
+                    f"signing in {confirmed_chargers} (new total {prev_pick_ch + confirmed_chargers}). Note is required to continue."
                 ),
             )
 
@@ -884,7 +884,7 @@ def event_report(
     x_event_token: str | None = Header(default=None, alias="X-Event-Token"),
 ):
     _require_event_token(event_id, x_event_token)
-    # One line per signed action (drop-off or pick-up). This preserves partial actions.
+    # One line per signed action (sign out or sign in). This preserves partial actions.
     rows = db.fetch_all(
         """
         SELECT
@@ -932,7 +932,9 @@ def event_report(
         )
         writer.writeheader()
         for r in rows:
-            writer.writerow(r)
+            out = dict(r)
+            out["action_type"] = "Signed Out" if r.get("action_type") == "dropoff" else "Signed In"
+            writer.writerow(out)
         return PlainTextResponse(buf.getvalue(), media_type="text/csv")
 
     # Return plain data so FastAPI can JSON-encode datetimes safely.
@@ -978,16 +980,27 @@ def event_overview_report(
                 "exhibitor_name",
                 "booth",
                 "reserved_phones",
-                "dropped_off_phones",
-                "picked_up_phones",
-                "dropoff_at",
-                "pickup_at",
+                "signed_out_phones",
+                "signed_in_phones",
+                "signed_out_at",
+                "signed_in_at",
             ],
             extrasaction="ignore",
         )
         writer.writeheader()
         for r in rows:
-            writer.writerow(r)
+            writer.writerow(
+                {
+                    "event_name": r.get("event_name"),
+                    "exhibitor_name": r.get("exhibitor_name"),
+                    "booth": r.get("booth"),
+                    "reserved_phones": r.get("reserved_phones"),
+                    "signed_out_phones": r.get("dropped_off_phones"),
+                    "signed_in_phones": r.get("picked_up_phones"),
+                    "signed_out_at": r.get("dropoff_at"),
+                    "signed_in_at": r.get("pickup_at"),
+                }
+            )
         return PlainTextResponse(buf.getvalue(), media_type="text/csv")
 
     return rows

@@ -1,12 +1,12 @@
-# Onsite Leads Phone Dropoff
+# Onsite Leads Phone Sign In/Out
 
-Tablet-friendly web app for tracking iPhone rental **drop-off** and **pick-up** per exhibitor at an event.
+Tablet-friendly web app for tracking iPhone rental **sign out** and **sign in** per exhibitor at an event.
 
 ## What It Does
 
 - Create events
 - Import exhibitors + reserved phone counts from the Totali Rentals Excel report
-- Capture a printed name + signature for every drop-off and pick-up (supports partial actions)
+- Capture a printed name + signature for every sign out and sign in (supports partial actions)
 - Export a single CSV report (one row per action)
 - Optional per-event password (required to open an event)
 - Delete events (permanent; includes confirmation)
@@ -59,8 +59,8 @@ Open `http://localhost:8000/`.
 3) Open the event
 4) Import the Totali Rentals Excel report
 5) For each exhibitor:
-   - Use **Drop-off** / **Pick-up** to record actions
-   - Partial drop-offs/pick-ups are allowed (e.g., drop off 1 now, another later)
+   - Use **Sign Out** / **Sign In** to record actions
+   - Partial sign outs/sign ins are allowed (e.g., sign out 1 now, another later)
    - A note is required only when the cumulative total would exceed the expected count
 6) Download the CSV report at any time
 
@@ -74,7 +74,7 @@ The import expects the same columns as the provided sample report:
 
 ## CSV Report
 
-The CSV export is **action-level** (one row per signed drop-off or pick-up), so partial actions create multiple rows for an exhibitor.
+The CSV export is **action-level** (one row per signed out / signed in action), so partial actions create multiple rows for an exhibitor.
 
 Columns:
 
@@ -82,7 +82,7 @@ Columns:
 - `exhibitor_name`
 - `booth`
 - `reserved_phones`
-- `action_type` (`dropoff` or `pickup`)
+- `action_type` (`Signed Out` or `Signed In`)
 - `quantity` (the number of phones recorded in that action)
 - `action_at` (UTC)
 - `printed_name`

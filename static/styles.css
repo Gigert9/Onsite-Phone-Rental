@@ -38,6 +38,9 @@ body {
   display: flex;
   justify-content: space-between;
   align-items: center;
+.eventTotals {
+  margin: 10px 0 18px;
+}
   padding: 14px 16px;
   background: linear-gradient(90deg, var(--lb2), var(--db));
   color: var(--white);
