@@ -89,11 +89,25 @@ async function api(path, options) {
       const body = await res.json();
       msg = body.detail || msg;
     } catch {}
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
   }
   const ct = res.headers.get("content-type") || "";
   if (ct.includes("application/json")) return await res.json();
   return await res.text();
+}
+
+function isUnauthorizedError(err) {
+  return err && (err.status === 401 || err.status === 403);
+}
+
+async function bounceToEventsView() {
+  activeEvent = null;
+  setActiveEventHeader();
+  show($("eventView"), false);
+  show($("eventsView"), true);
+  await loadEvents();
 }
 
 function _tokenKey(eventId) {
@@ -128,7 +142,9 @@ async function apiEventBlob(eventId, path, options = {}) {
       const body = await res.json();
       msg = body.detail || msg;
     } catch {}
-    throw new Error(msg);
+    const err = new Error(msg);
+    err.status = res.status;
+    throw err;
   }
   return await res.blob();
 }
@@ -230,13 +246,30 @@ async function openEvent(ev) {
   show($("eventsView"), false);
   show($("eventView"), true);
   $("importStatus").textContent = "";
-  await loadExhibitors();
+  try {
+    await loadExhibitors();
+  } catch (e) {
+    // Avoid leaving the UI in a perpetual "Loading..." state.
+    $("exhibitorsList").textContent = e.message || String(e);
+  }
 }
 
-async function loadExhibitors() {
+async function loadExhibitors(_retry = false) {
   const list = $("exhibitorsList");
   list.textContent = "Loading...";
-  exhibitors = await apiEvent(activeEvent.event_id, `/api/events/${activeEvent.event_id}/exhibitors`);
+
+  try {
+    exhibitors = await apiEvent(activeEvent.event_id, `/api/events/${activeEvent.event_id}/exhibitors`);
+  } catch (e) {
+    // If the token expired (or the server restarted and lost in-memory tokens),
+    // clear the stored token and bounce back to Events so the user can re-open and re-auth.
+    if (!_retry && activeEvent && isUnauthorizedError(e)) {
+      removeEventToken(activeEvent.event_id);
+      await bounceToEventsView();
+      return;
+    }
+    throw e;
+  }
 
   setEventTotals(exhibitors);
 

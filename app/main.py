@@ -13,6 +13,7 @@ from fastapi.responses import FileResponse, PlainTextResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import db
+from . import config
 from .excel_import import parse_totali_phone_rentals_xls
 
 
@@ -25,6 +26,10 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 PBKDF2_ITERATIONS = 210_000
 PBKDF2_HASH_NAME = "sha256"
+
+EVENT_TOKEN_HOURS = config.env_int_optional("EVENT_TOKEN_HOURS", 12) or 12
+if EVENT_TOKEN_HOURS < 1:
+    EVENT_TOKEN_HOURS = 12
 
 # In-memory unlock tokens: { (event_id, token): expires_epoch }
 _EVENT_TOKENS: dict[tuple[int, str], float] = {}
@@ -54,7 +59,7 @@ def _clean_expired_tokens(now: float | None = None) -> None:
         _EVENT_TOKENS.pop(k, None)
 
 
-def _issue_event_token(event_id: int, hours: int = 12) -> str:
+def _issue_event_token(event_id: int, hours: int = EVENT_TOKEN_HOURS) -> str:
     _clean_expired_tokens()
     token = secrets.token_urlsafe(24)
     _EVENT_TOKENS[(event_id, token)] = time.time() + (hours * 3600)
