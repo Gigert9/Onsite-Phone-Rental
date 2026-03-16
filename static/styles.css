@@ -136,6 +136,12 @@ textarea.input {
   outline: none;
 }
 
+.input:disabled {
+  opacity: 1;
+  color: var(--text);
+  background: var(--white);
+}
+
 .input:focus {
   border-color: rgba(61, 174, 227, 0.8);
   box-shadow: 0 0 0 3px rgba(61, 174, 227, 0.18);

@@ -121,6 +121,65 @@
         </div>
       </section>
 
+      <section class="sheet hidden" id="editActionSheet" aria-hidden="true">
+        <div class="sheet__panel">
+          <div class="row row--space">
+            <div>
+              <div class="h2" id="editActionTitle">Edit Transaction</div>
+              <div class="muted" id="editActionSub"></div>
+            </div>
+            <button class="btn" id="closeEditActionBtn">Close</button>
+          </div>
+
+          <div class="row">
+            <label class="label">
+              Phones to confirm
+              <input class="input" id="editConfirmPhones" type="number" min="0" />
+            </label>
+            <label class="label">
+              Printed name
+              <input class="input" id="editPrintedName" placeholder="Printed name" />
+            </label>
+          </div>
+
+          <label class="label" id="editPhoneIdsLabel">
+            Phone ID numbers
+            <textarea class="input textarea" id="editPhoneIdsText" rows="3" placeholder="Enter phone ID numbers (one per line)"></textarea>
+          </label>
+
+          <div class="row" id="editDropoffChargerRow">
+            <label class="label" style="min-width: 180px; flex: 0 0 auto;">
+              Charger signed out?
+              <input id="editChargerIncluded" type="checkbox" />
+            </label>
+            <label class="label" id="editChargerQtyLabel">
+              Chargers quantity
+              <input class="input" id="editChargerQty" type="number" min="0" />
+            </label>
+          </div>
+
+          <div class="row hidden" id="editPickupChargerRow">
+            <label class="label">
+              Chargers to sign in
+              <input class="input" id="editConfirmChargers" type="number" min="0" />
+            </label>
+          </div>
+
+          <div class="warning hidden" id="editDiscrepancyWarning"></div>
+
+          <label class="label" id="editNoteLabel">
+            Note (required for mismatches)
+            <textarea class="input textarea" id="editNoteText" rows="3" placeholder="Explain the discrepancy"></textarea>
+          </label>
+
+          <div class="row row--end">
+            <button class="btn btn--primary" id="saveEditActionBtn">Save</button>
+          </div>
+
+          <div class="muted" id="editActionStatus"></div>
+        </div>
+      </section>
+
       <section class="sheet hidden" id="actionSheet" aria-hidden="true">
         <div class="sheet__panel">
           <div class="row row--space">

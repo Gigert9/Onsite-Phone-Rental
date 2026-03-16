@@ -11,6 +11,8 @@ let reportsOpen = false;
 
 let signaturesFlow = null; // { eventExhibitorId, displayName }
 
+let editActionFlow = null; // { actionId, eventExhibitorId, actionType }
+
 function labelForActionType(type) {
   return type === "dropoff" ? "Sign Out" : "Sign In";
 }
@@ -315,7 +317,7 @@ async function loadExhibitors(_retry = false) {
 
     const boothText = x.booth ? String(x.booth) : "";
     const boothSuffix = boothText ? ` / ${boothText}` : "";
-    const sigLinkHtml = x.has_signature ? '<a class="link item__sigLink" href="#">View signatures</a>' : "";
+    const sigLinkHtml = x.has_signature ? '<a class="link item__sigLink" href="#">View transactions</a>' : "";
 
     div.innerHTML = `
       <button class="item__delete" type="button" aria-label="Delete exhibitor" title="Delete">X</button>
@@ -373,7 +375,7 @@ async function loadExhibitors(_retry = false) {
 function openSignaturesSheet(x) {
   if (!activeEvent) return;
   signaturesFlow = { eventExhibitorId: x.event_exhibitor_id, displayName: x.display_name };
-  $("signaturesTitle").textContent = "Signatures";
+  $("signaturesTitle").textContent = "Transactions";
   $("signaturesSub").textContent = x.display_name;
   $("signaturesStatus").textContent = "Loading...";
   $("signaturesList").innerHTML = "";
@@ -394,6 +396,131 @@ function closeSignaturesSheet() {
   sheet.setAttribute("aria-hidden", "true");
   $("signaturesStatus").textContent = "";
   $("signaturesList").innerHTML = "";
+}
+
+function openEditActionSheet(r) {
+  if (!activeEvent || !signaturesFlow) return;
+
+  editActionFlow = {
+    actionId: r.action_id,
+    eventExhibitorId: signaturesFlow.eventExhibitorId,
+    actionType: r.action_type,
+  };
+
+  $("editActionTitle").textContent = `Edit ${labelForActionType(r.action_type)} Transaction`;
+  $("editActionSub").textContent = signaturesFlow.displayName || "";
+  $("editActionStatus").textContent = "";
+
+  $("editConfirmPhones").value = String(r.quantity ?? 0);
+  $("editPrintedName").value = r.printed_name || "";
+  $("editNoteText").value = r.note || "";
+
+  const hasPhoneIds = Object.prototype.hasOwnProperty.call(r, "phone_ids");
+  const hasChargerQty = Object.prototype.hasOwnProperty.call(r, "charger_qty");
+
+  // Phone IDs (only meaningful for Sign Out)
+  const idsLabel = $("editPhoneIdsLabel");
+  if (r.action_type === "dropoff" && hasPhoneIds) {
+    show(idsLabel, true);
+    $("editPhoneIdsText").value = (r.phone_ids || "").trim();
+  } else {
+    show(idsLabel, false);
+    $("editPhoneIdsText").value = "";
+  }
+
+  // Chargers
+  const dropRow = $("editDropoffChargerRow");
+  const pickRow = $("editPickupChargerRow");
+  if (r.action_type === "dropoff") {
+    show(dropRow, hasChargerQty);
+    show(pickRow, false);
+    const cq = parseInt(r.charger_qty, 10);
+    const has = Number.isFinite(cq) && cq > 0;
+    $("editChargerIncluded").checked = has;
+    $("editChargerQty").value = String(has ? cq : 0);
+    $("editChargerQty").disabled = !has;
+  } else {
+    show(dropRow, false);
+    show(pickRow, hasChargerQty);
+    const c = parseInt(r.charger_qty, 10);
+    $("editConfirmChargers").value = String(Number.isFinite(c) ? c : 0);
+  }
+
+  // Note is always available; server is authoritative for whether it's required.
+  show($("editNoteLabel"), true);
+  show($("editDiscrepancyWarning"), false);
+  $("editDiscrepancyWarning").textContent = "";
+
+  const sheet = $("editActionSheet");
+  show(sheet, true);
+  sheet.setAttribute("aria-hidden", "false");
+}
+
+function closeEditActionSheet() {
+  editActionFlow = null;
+  const sheet = $("editActionSheet");
+  show(sheet, false);
+  sheet.setAttribute("aria-hidden", "true");
+  $("editActionStatus").textContent = "";
+}
+
+$("editChargerIncluded").addEventListener("change", () => {
+  const checked = $("editChargerIncluded").checked;
+  const qty = $("editChargerQty");
+  qty.disabled = !checked;
+  if (!checked) qty.value = "0";
+  if (checked && (!qty.value || qty.value === "0")) qty.value = "1";
+});
+
+async function saveEditedAction() {
+  if (!activeEvent || !editActionFlow) return;
+
+  const status = $("editActionStatus");
+  status.textContent = "";
+
+  const confirmed = parseInt($("editConfirmPhones").value, 10);
+  const printedName = $("editPrintedName").value.trim();
+  const note = $("editNoteText").value.trim();
+
+  if (!Number.isFinite(confirmed) || confirmed < 0) {
+    status.textContent = "Please enter a valid phone count.";
+    return;
+  }
+  if (!printedName) {
+    status.textContent = "Printed name is required.";
+    return;
+  }
+
+  const payload = {
+    confirmed_phones: confirmed,
+    printed_name: printedName,
+    note,
+  };
+
+  if (editActionFlow.actionType === "dropoff") {
+    payload.phone_ids = $("editPhoneIdsText").value.trim();
+    payload.charger_included = $("editChargerIncluded").checked;
+    payload.charger_qty = parseInt($("editChargerQty").value, 10);
+  } else {
+    const c = parseInt($("editConfirmChargers").value, 10);
+    if (Number.isFinite(c) && c >= 0) payload.confirmed_chargers = c;
+  }
+
+  status.textContent = "Saving...";
+  try {
+    await apiEvent(activeEvent.event_id, `/api/event-exhibitor-actions/${editActionFlow.actionId}`, {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+
+    status.textContent = "Saved.";
+    closeEditActionSheet();
+    await loadExhibitors();
+    await loadSignatures();
+  } catch (e) {
+    status.textContent = e.message || String(e);
+  }
 }
 
 async function loadSignatures() {
@@ -429,11 +556,13 @@ async function loadSignatures() {
       </div>
       <div class="item__right">
         <button class="btn btn--small" ${hasSig ? "" : "disabled"}>Open signature</button>
+        <button class="btn btn--small">Edit transaction</button>
       </div>
     `;
 
-    const btn = div.querySelector("button");
-    btn.addEventListener("click", async () => {
+    const [openBtn, editBtn] = div.querySelectorAll("button");
+
+    openBtn.addEventListener("click", async () => {
       if (!hasSig) return;
       try {
         const blob = await apiEventBlob(activeEvent.event_id, r.signature_url);
@@ -445,6 +574,8 @@ async function loadSignatures() {
         status.textContent = e.message || String(e);
       }
     });
+
+    editBtn.addEventListener("click", () => openEditActionSheet(r));
 
     list.appendChild(div);
   }
@@ -572,9 +703,13 @@ function openActionSheet(type, x) {
   // Phone IDs: editable only on sign out; auto-populated on sign in.
   const idsEl = $("phoneIdsText");
   if (type === "dropoff") {
+    idsEl.disabled = false;
     idsEl.readOnly = false;
     idsEl.value = "";
   } else {
+    // Prevent users from clicking/focusing into this field on Sign In.
+    // We still show the signed-out IDs for reference.
+    idsEl.disabled = true;
     idsEl.readOnly = true;
     idsEl.value = (x.dropoff_phone_ids || "").trim();
   }
@@ -983,6 +1118,13 @@ $("closeSignaturesBtn").addEventListener("click", closeSignaturesSheet);
 $("signaturesSheet").addEventListener("click", (e) => {
   if (e.target === $("signaturesSheet")) closeSignaturesSheet();
 });
+
+// --- Edit Transaction modal wiring ---
+$("closeEditActionBtn").addEventListener("click", closeEditActionSheet);
+$("editActionSheet").addEventListener("click", (e) => {
+  if (e.target === $("editActionSheet")) closeEditActionSheet();
+});
+$("saveEditActionBtn").addEventListener("click", saveEditedAction);
 
 // --- Confirm modal wiring ---
 $("closeConfirmBtn").addEventListener("click", closeConfirmSheet);

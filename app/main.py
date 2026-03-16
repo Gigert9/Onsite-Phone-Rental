@@ -149,7 +149,7 @@ def create_event(payload: dict[str, Any]) -> dict[str, Any]:
 def delete_event(event_id: int) -> dict[str, Any]:
     # Destructive operation: permanently removes the event and all related rows.
     with db.get_conn() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(as_dict=True) as cur:
             cur.execute("SELECT event_id FROM dbo.events WHERE event_id=%s", (event_id,))
             if not cur.fetchone():
                 raise HTTPException(status_code=404, detail="Event not found")
@@ -698,7 +698,7 @@ def dropoff(
     has_parent_chargers = _db_has_column("dbo.event_exhibitors", "dropoff_confirmed_chargers")
 
     with db.get_conn() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(as_dict=True) as cur:
             # Insert signed action record
             cols = ["event_exhibitor_id", "action_type", "quantity", "action_at", "printed_name", "signature", "note"]
             vals: list[Any] = [event_exhibitor_id, "dropoff", confirmed_int, now, printed_name, sig_bytes, note or None]
@@ -839,7 +839,7 @@ def pickup(
             )
 
     with db.get_conn() as conn:
-        with conn.cursor() as cur:
+        with conn.cursor(as_dict=True) as cur:
             cols = ["event_exhibitor_id", "action_type", "quantity", "action_at", "printed_name", "signature", "note"]
             vals: list[Any] = [event_exhibitor_id, "pickup", confirmed_int, now, printed_name, sig_bytes, note or None]
             if has_action_charger_qty:
@@ -1034,6 +1034,327 @@ def get_action_signature(
     return Response(content=bytes(sig), media_type="image/png")
 
 
+def _validate_running_total_note(actions: list[dict[str, Any]], expected: int, label: str) -> None:
+    running = 0
+    for a in actions:
+        running += int(a.get("quantity") or 0)
+        if running > expected:
+            note = str(a.get("note") or "").strip()
+            if not note:
+                when = a.get("action_at")
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Discrepancy: {label} expected max {expected}, but running total reaches {running}. "
+                        f"A note is required on the transaction that exceeds the expected count" + (f" (at {when})." if when else ".")
+                    ),
+                )
+
+
+def _ensure_dict_rows(cur: Any, rows: list[Any]) -> list[dict[str, Any]]:
+    if not rows:
+        return []
+    if isinstance(rows[0], dict):
+        return rows  # type: ignore[return-value]
+
+    # pymssql tuple cursor: use cursor.description for column names.
+    desc = getattr(cur, "description", None)
+    if not desc:
+        raise RuntimeError("DB cursor did not provide description for tuple rows")
+    cols = [d[0] for d in desc]
+    out: list[dict[str, Any]] = []
+    for r in rows:
+        out.append({cols[i]: r[i] for i in range(min(len(cols), len(r)))})
+    return out
+
+
+@app.patch("/api/event-exhibitor-actions/{action_id}")
+def edit_event_exhibitor_action(
+    action_id: int,
+    payload: dict[str, Any],
+    x_event_token: str | None = Header(default=None, alias="X-Event-Token"),
+) -> dict[str, Any]:
+    # Editable fields: quantity, printed_name, note, phone_ids (dropoff), charger qtys.
+    confirmed = payload.get("confirmed_phones")
+    printed_name = str(payload.get("printed_name") or "").strip()
+    note = str(payload.get("note") or "").strip()
+
+    phone_ids = str(payload.get("phone_ids") or "").strip()
+    charger_included = bool(payload.get("charger_included") or False)
+    charger_qty_raw = payload.get("charger_qty")
+    confirmed_chargers_raw = payload.get("confirmed_chargers")
+
+    try:
+        confirmed_int = int(confirmed)
+    except Exception:
+        raise HTTPException(status_code=400, detail="confirmed_phones must be an integer")
+
+    if confirmed_int < 0:
+        raise HTTPException(status_code=400, detail="confirmed_phones must be >= 0")
+    if not printed_name:
+        raise HTTPException(status_code=400, detail="Printed name is required")
+
+    has_action_phone_ids = _db_has_column("dbo.event_exhibitor_actions", "phone_ids")
+    has_action_charger_qty = _db_has_column("dbo.event_exhibitor_actions", "charger_qty")
+    has_parent_phone_ids = _db_has_column("dbo.event_exhibitors", "dropoff_phone_ids")
+    has_parent_drop_chargers = _db_has_column("dbo.event_exhibitors", "dropoff_confirmed_chargers")
+    has_parent_pick_chargers = _db_has_column("dbo.event_exhibitors", "pickup_confirmed_chargers")
+
+    # Fetch the existing action and associated exhibitor/event for auth and recompute.
+    action_row = db.fetch_one(
+        """
+        SELECT
+            a.action_id,
+            a.event_exhibitor_id,
+            a.action_type,
+            a.action_at,
+            ee.event_id,
+            ee.reserved_phones
+        FROM dbo.event_exhibitor_actions a
+        JOIN dbo.event_exhibitors ee ON ee.event_exhibitor_id = a.event_exhibitor_id
+        WHERE a.action_id=%s
+        """,
+        (action_id,),
+    )
+    if not action_row:
+        raise HTTPException(status_code=404, detail="Record not found")
+    event_id = int(action_row["event_id"])
+    event_exhibitor_id = int(action_row["event_exhibitor_id"])
+    action_type = str(action_row["action_type"] or "").strip().lower()
+    reserved = int(action_row["reserved_phones"])
+    _require_event_token(event_id, x_event_token)
+
+    if action_type not in {"dropoff", "pickup"}:
+        raise HTTPException(status_code=400, detail="Unsupported action type")
+
+    # Validate phone IDs for dropoff edits (when feature is available).
+    if action_type == "dropoff" and confirmed_int > 0:
+        if not phone_ids:
+            raise HTTPException(status_code=400, detail="Phone ID numbers are required when dropping off phones")
+        import re
+
+        parsed_ids = [t.strip() for t in re.split(r"[\r\n,;]+", phone_ids) if t and t.strip()]
+        if len(parsed_ids) != confirmed_int:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Please provide exactly {confirmed_int} phone ID number(s). Got {len(parsed_ids)}.",
+            )
+        if not has_parent_phone_ids:
+            raise HTTPException(
+                status_code=409,
+                detail="Database is missing dropoff_phone_ids column. Please run database/setup.sql schema upgrades.",
+            )
+        if not has_action_phone_ids:
+            raise HTTPException(
+                status_code=409,
+                detail="Database is missing event_exhibitor_actions.phone_ids column. Please run database/setup.sql schema upgrades.",
+            )
+
+    # Validate charger quantities.
+    dropoff_charger_qty: int | None = None
+    pickup_charger_qty: int | None = None
+
+    if action_type == "dropoff":
+        if charger_included:
+            if not has_action_charger_qty:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Database is missing event_exhibitor_actions.charger_qty column. Please run database/setup.sql schema upgrades.",
+                )
+            try:
+                q = int(charger_qty_raw)
+            except Exception:
+                raise HTTPException(status_code=400, detail="charger_qty must be an integer")
+            if q <= 0:
+                raise HTTPException(status_code=400, detail="charger_qty must be >= 1 when charger_included is true")
+            dropoff_charger_qty = q
+        else:
+            dropoff_charger_qty = None
+    else:
+        if confirmed_chargers_raw is not None:
+            if not has_action_charger_qty:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Database is missing event_exhibitor_actions.charger_qty column. Please run database/setup.sql schema upgrades.",
+                )
+            try:
+                q = int(confirmed_chargers_raw)
+            except Exception:
+                raise HTTPException(status_code=400, detail="confirmed_chargers must be an integer")
+            if q < 0:
+                raise HTTPException(status_code=400, detail="confirmed_chargers must be >= 0")
+            pickup_charger_qty = q if q > 0 else None
+
+    with db.get_conn() as conn:
+        with conn.cursor(as_dict=True) as cur:
+            # 1) Update the action row (do not change signature or timestamp).
+            sets: list[str] = ["quantity=%s", "printed_name=%s", "note=%s"]
+            vals: list[Any] = [confirmed_int, printed_name, note or None]
+
+            if action_type == "dropoff" and has_action_phone_ids:
+                sets.append("phone_ids=%s")
+                vals.append(phone_ids or None)
+
+            if has_action_charger_qty:
+                if action_type == "dropoff":
+                    sets.append("charger_qty=%s")
+                    vals.append(dropoff_charger_qty)
+                else:
+                    # Only update when supplied; otherwise leave as-is.
+                    if confirmed_chargers_raw is not None:
+                        sets.append("charger_qty=%s")
+                        vals.append(pickup_charger_qty)
+
+            vals.append(action_id)
+            cur.execute(
+                f"UPDATE dbo.event_exhibitor_actions SET {', '.join(sets)} WHERE action_id=%s",
+                tuple(vals),
+            )
+            if cur.rowcount <= 0:
+                raise HTTPException(status_code=404, detail="Record not found")
+
+            # 2) Recompute aggregates and snapshots from all actions.
+            select_cols = [
+                "a.action_id",
+                "a.action_type",
+                "a.quantity",
+                "a.action_at",
+                "a.printed_name",
+                "a.signature",
+                "a.note",
+            ]
+            if has_action_phone_ids:
+                select_cols.append("a.phone_ids")
+            if has_action_charger_qty:
+                select_cols.append("a.charger_qty")
+
+            cur.execute(
+                f"""
+                SELECT {', '.join(select_cols)}
+                FROM dbo.event_exhibitor_actions a
+                WHERE a.event_exhibitor_id=%s
+                ORDER BY a.action_at ASC, a.action_id ASC
+                """,
+                (event_exhibitor_id,),
+            )
+            rows = _ensure_dict_rows(cur, list(cur.fetchall()))
+
+            drop_actions = [r for r in rows if str(r.get("action_type") or "").lower() == "dropoff"]
+            pick_actions = [r for r in rows if str(r.get("action_type") or "").lower() == "pickup"]
+
+            drop_total = sum(int(r.get("quantity") or 0) for r in drop_actions)
+            pick_total = sum(int(r.get("quantity") or 0) for r in pick_actions)
+
+            # Expected counts depend on dropoff totals.
+            expected_drop = reserved
+            expected_pick = drop_total if drop_actions else reserved
+
+            _validate_running_total_note(drop_actions, expected_drop, "sign out")
+            _validate_running_total_note(pick_actions, expected_pick, "sign in")
+
+            # Charger mismatch rule mirrors phone mismatch rule.
+            if has_action_charger_qty and (has_parent_drop_chargers or has_parent_pick_chargers):
+                expected_ch = sum(int(r.get("charger_qty") or 0) for r in drop_actions)
+                running = 0
+                for a in pick_actions:
+                    running += int(a.get("charger_qty") or 0)
+                    if running > expected_ch:
+                        n = str(a.get("note") or "").strip()
+                        if not n:
+                            when = a.get("action_at")
+                            raise HTTPException(
+                                status_code=400,
+                                detail=(
+                                    f"Discrepancy: charger sign in expected max {expected_ch}, but running total reaches {running}. "
+                                    f"A note is required on the transaction that exceeds the expected count" + (f" (at {when})." if when else ".")
+                                ),
+                            )
+
+            # Determine last snapshots (most recent by action_at, action_id).
+            def _last(xs: list[dict[str, Any]]) -> dict[str, Any] | None:
+                if not xs:
+                    return None
+                return sorted(xs, key=lambda a: (a.get("action_at") or _utc_now(), int(a.get("action_id") or 0)))[-1]
+
+            last_drop = _last(drop_actions)
+            last_pick = _last(pick_actions)
+
+            update_sets: list[str] = []
+            update_vals2: list[Any] = []
+
+            update_sets.append("dropoff_confirmed_phones=%s")
+            update_vals2.append(drop_total if drop_total > 0 else None)
+            update_sets.append("pickup_confirmed_phones=%s")
+            update_vals2.append(pick_total if pick_total > 0 else None)
+
+            if last_drop:
+                update_sets.extend(
+                    [
+                        "dropoff_at=%s",
+                        "dropoff_printed_name=%s",
+                        "dropoff_signature=%s",
+                        "dropoff_note=%s",
+                    ]
+                )
+                update_vals2.extend(
+                    [
+                        last_drop.get("action_at"),
+                        last_drop.get("printed_name"),
+                        last_drop.get("signature"),
+                        last_drop.get("note"),
+                    ]
+                )
+            else:
+                update_sets.extend(["dropoff_at=%s", "dropoff_printed_name=%s", "dropoff_signature=%s", "dropoff_note=%s"])
+                update_vals2.extend([None, None, None, None])
+
+            if last_pick:
+                update_sets.extend(
+                    [
+                        "pickup_at=%s",
+                        "pickup_printed_name=%s",
+                        "pickup_signature=%s",
+                        "pickup_note=%s",
+                    ]
+                )
+                update_vals2.extend(
+                    [
+                        last_pick.get("action_at"),
+                        last_pick.get("printed_name"),
+                        last_pick.get("signature"),
+                        last_pick.get("note"),
+                    ]
+                )
+            else:
+                update_sets.extend(["pickup_at=%s", "pickup_printed_name=%s", "pickup_signature=%s", "pickup_note=%s"])
+                update_vals2.extend([None, None, None, None])
+
+            if has_parent_phone_ids and has_action_phone_ids:
+                combined_ids = "\n".join(
+                    [str(r.get("phone_ids") or "").strip() for r in drop_actions if str(r.get("phone_ids") or "").strip()]
+                ).strip()
+                update_sets.append("dropoff_phone_ids=%s")
+                update_vals2.append(combined_ids or None)
+
+            if has_parent_drop_chargers and has_action_charger_qty:
+                update_sets.append("dropoff_confirmed_chargers=%s")
+                update_vals2.append(sum(int(r.get("charger_qty") or 0) for r in drop_actions) or None)
+
+            if has_parent_pick_chargers and has_action_charger_qty:
+                update_sets.append("pickup_confirmed_chargers=%s")
+                update_vals2.append(sum(int(r.get("charger_qty") or 0) for r in pick_actions) or None)
+
+            update_vals2.append(event_exhibitor_id)
+            cur.execute(
+                f"UPDATE dbo.event_exhibitors SET {', '.join(update_sets)} WHERE event_exhibitor_id=%s",
+                tuple(update_vals2),
+            )
+            if cur.rowcount <= 0:
+                raise HTTPException(status_code=404, detail="Record not found")
+
+    return {"ok": True}
+
+
 @app.get("/api/event-exhibitors/{event_exhibitor_id}/actions")
 def list_event_exhibitor_actions(
     event_exhibitor_id: int,
@@ -1048,8 +1369,19 @@ def list_event_exhibitor_actions(
     event_id = int(row["event_id"])
     _require_event_token(event_id, x_event_token)
 
+    has_action_phone_ids = _db_has_column("dbo.event_exhibitor_actions", "phone_ids")
+    has_action_charger_qty = _db_has_column("dbo.event_exhibitor_actions", "charger_qty")
+
+    extra_cols: list[str] = []
+    if has_action_phone_ids:
+        extra_cols.append("a.phone_ids")
+    if has_action_charger_qty:
+        extra_cols.append("a.charger_qty")
+
+    extra_sql = (",\n            " + ",\n            ".join(extra_cols)) if extra_cols else ""
+
     rows = db.fetch_all(
-        """
+        f"""
         SELECT
             a.action_id,
             a.action_type,
@@ -1058,6 +1390,7 @@ def list_event_exhibitor_actions(
             a.printed_name,
             a.note,
             CASE WHEN a.signature IS NULL THEN CAST(0 AS bit) ELSE CAST(1 AS bit) END AS has_signature
+            {extra_sql}
         FROM dbo.event_exhibitor_actions a
         WHERE a.event_exhibitor_id=%s
         ORDER BY a.action_at ASC, a.action_id ASC
