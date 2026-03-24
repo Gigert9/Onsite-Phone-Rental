@@ -889,6 +889,85 @@ def event_report(
     x_event_token: str | None = Header(default=None, alias="X-Event-Token"),
 ):
     _require_event_token(event_id, x_event_token)
+
+
+def _phone_ids_to_csv(val: Any) -> str:
+    txt = str(val or "").strip()
+    if not txt:
+        return ""
+    import re
+
+    parts = [t.strip() for t in re.split(r"[\r\n,;]+", txt) if t and t.strip()]
+    return ", ".join(parts)
+
+    if format.lower() == "csv":
+        # One line per signed action (sign out or sign in). This preserves partial actions.
+        # Phone IDs are stored on dropoff actions and (as a snapshot) on the parent row.
+        has_action_phone_ids = _db_has_column("dbo.event_exhibitor_actions", "phone_ids")
+        has_parent_phone_ids = _db_has_column("dbo.event_exhibitors", "dropoff_phone_ids")
+        if has_action_phone_ids and has_parent_phone_ids:
+            phone_ids_expr = "COALESCE(NULLIF(LTRIM(RTRIM(a.phone_ids)), ''), ee.dropoff_phone_ids) AS phone_ids"
+        elif has_action_phone_ids:
+            phone_ids_expr = "a.phone_ids AS phone_ids"
+        elif has_parent_phone_ids:
+            phone_ids_expr = "ee.dropoff_phone_ids AS phone_ids"
+        else:
+            phone_ids_expr = "CAST(NULL AS nvarchar(max)) AS phone_ids"
+
+        rows = db.fetch_all(
+            f"""
+            SELECT
+                a.action_id,
+                ev.name AS event_name,
+                e.display_name AS exhibitor_name,
+                e.booth AS booth,
+                ee.reserved_phones,
+                a.action_type,
+                a.quantity,
+                a.action_at,
+                a.printed_name,
+                a.note,
+                {phone_ids_expr}
+            FROM dbo.event_exhibitor_actions a
+            JOIN dbo.event_exhibitors ee ON ee.event_exhibitor_id = a.event_exhibitor_id
+            JOIN dbo.events ev ON ev.event_id = ee.event_id
+            JOIN dbo.exhibitors e ON e.exhibitor_id = ee.exhibitor_id
+            WHERE ee.event_id = %s
+            ORDER BY e.display_name ASC, a.action_at ASC, a.action_id ASC
+            """,
+            (event_id,),
+        )
+
+        # minimal CSV, no extra dependencies
+        import csv
+        import io
+
+        buf = io.StringIO()
+        writer = csv.DictWriter(
+            buf,
+            fieldnames=[
+                "action_id",
+                "event_name",
+                "exhibitor_name",
+                "booth",
+                "reserved_phones",
+                "action_type",
+                "quantity",
+                "action_at",
+                "printed_name",
+                "note",
+                "phone_ids",
+            ],
+            extrasaction="ignore",
+        )
+        writer.writeheader()
+        for r in rows:
+            out = dict(r)
+            out["action_type"] = "Signed Out" if r.get("action_type") == "dropoff" else "Signed In"
+            out["phone_ids"] = _phone_ids_to_csv(r.get("phone_ids"))
+            writer.writerow(out)
+        return PlainTextResponse(buf.getvalue(), media_type="text/csv")
+
     # One line per signed action (sign out or sign in). This preserves partial actions.
     rows = db.fetch_all(
         """
@@ -913,35 +992,6 @@ def event_report(
         (event_id,),
     )
 
-    if format.lower() == "csv":
-        # minimal CSV, no extra dependencies
-        import csv
-        import io
-
-        buf = io.StringIO()
-        writer = csv.DictWriter(
-            buf,
-            fieldnames=[
-                "action_id",
-                "event_name",
-                "exhibitor_name",
-                "booth",
-                "reserved_phones",
-                "action_type",
-                "quantity",
-                "action_at",
-                "printed_name",
-                "note",
-            ],
-            extrasaction="ignore",
-        )
-        writer.writeheader()
-        for r in rows:
-            out = dict(r)
-            out["action_type"] = "Signed Out" if r.get("action_type") == "dropoff" else "Signed In"
-            writer.writerow(out)
-        return PlainTextResponse(buf.getvalue(), media_type="text/csv")
-
     # Return plain data so FastAPI can JSON-encode datetimes safely.
     return rows
 
@@ -953,6 +1003,69 @@ def event_overview_report(
     x_event_token: str | None = Header(default=None, alias="X-Event-Token"),
 ):
     _require_event_token(event_id, x_event_token)
+
+    if format.lower() == "csv":
+        has_parent_phone_ids = _db_has_column("dbo.event_exhibitors", "dropoff_phone_ids")
+        phone_ids_expr = (
+            "ee.dropoff_phone_ids AS phone_ids" if has_parent_phone_ids else "CAST(NULL AS nvarchar(max)) AS phone_ids"
+        )
+        rows = db.fetch_all(
+            f"""
+            SELECT
+                ev.name AS event_name,
+                e.display_name AS exhibitor_name,
+                e.booth AS booth,
+                ee.reserved_phones,
+                ISNULL(ee.dropoff_confirmed_phones, 0) AS dropped_off_phones,
+                ISNULL(ee.pickup_confirmed_phones, 0) AS picked_up_phones,
+                ee.dropoff_at,
+                ee.pickup_at,
+                {phone_ids_expr}
+            FROM dbo.event_exhibitors ee
+            JOIN dbo.events ev ON ev.event_id = ee.event_id
+            JOIN dbo.exhibitors e ON e.exhibitor_id = ee.exhibitor_id
+            WHERE ee.event_id = %s
+            ORDER BY e.display_name ASC
+            """,
+            (event_id,),
+        )
+
+        import csv
+        import io
+
+        buf = io.StringIO()
+        writer = csv.DictWriter(
+            buf,
+            fieldnames=[
+                "event_name",
+                "exhibitor_name",
+                "booth",
+                "reserved_phones",
+                "signed_out_phones",
+                "signed_in_phones",
+                "signed_out_at",
+                "signed_in_at",
+                "phone_ids",
+            ],
+            extrasaction="ignore",
+        )
+        writer.writeheader()
+        for r in rows:
+            writer.writerow(
+                {
+                    "event_name": r.get("event_name"),
+                    "exhibitor_name": r.get("exhibitor_name"),
+                    "booth": r.get("booth"),
+                    "reserved_phones": r.get("reserved_phones"),
+                    "signed_out_phones": r.get("dropped_off_phones"),
+                    "signed_in_phones": r.get("picked_up_phones"),
+                    "signed_out_at": r.get("dropoff_at"),
+                    "signed_in_at": r.get("pickup_at"),
+                    "phone_ids": _phone_ids_to_csv(r.get("phone_ids")),
+                }
+            )
+        return PlainTextResponse(buf.getvalue(), media_type="text/csv")
+
     rows = db.fetch_all(
         """
         SELECT
@@ -972,41 +1085,6 @@ def event_overview_report(
         """,
         (event_id,),
     )
-
-    if format.lower() == "csv":
-        import csv
-        import io
-
-        buf = io.StringIO()
-        writer = csv.DictWriter(
-            buf,
-            fieldnames=[
-                "event_name",
-                "exhibitor_name",
-                "booth",
-                "reserved_phones",
-                "signed_out_phones",
-                "signed_in_phones",
-                "signed_out_at",
-                "signed_in_at",
-            ],
-            extrasaction="ignore",
-        )
-        writer.writeheader()
-        for r in rows:
-            writer.writerow(
-                {
-                    "event_name": r.get("event_name"),
-                    "exhibitor_name": r.get("exhibitor_name"),
-                    "booth": r.get("booth"),
-                    "reserved_phones": r.get("reserved_phones"),
-                    "signed_out_phones": r.get("dropped_off_phones"),
-                    "signed_in_phones": r.get("picked_up_phones"),
-                    "signed_out_at": r.get("dropoff_at"),
-                    "signed_in_at": r.get("pickup_at"),
-                }
-            )
-        return PlainTextResponse(buf.getvalue(), media_type="text/csv")
 
     return rows
 
