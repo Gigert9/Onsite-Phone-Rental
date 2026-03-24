@@ -890,16 +890,6 @@ def event_report(
 ):
     _require_event_token(event_id, x_event_token)
 
-
-def _phone_ids_to_csv(val: Any) -> str:
-    txt = str(val or "").strip()
-    if not txt:
-        return ""
-    import re
-
-    parts = [t.strip() for t in re.split(r"[\r\n,;]+", txt) if t and t.strip()]
-    return ", ".join(parts)
-
     if format.lower() == "csv":
         # One line per signed action (sign out or sign in). This preserves partial actions.
         # Phone IDs are stored on dropoff actions and (as a snapshot) on the parent row.
@@ -994,6 +984,16 @@ def _phone_ids_to_csv(val: Any) -> str:
 
     # Return plain data so FastAPI can JSON-encode datetimes safely.
     return rows
+
+
+def _phone_ids_to_csv(val: Any) -> str:
+    txt = str(val or "").strip()
+    if not txt:
+        return ""
+    import re
+
+    parts = [t.strip() for t in re.split(r"[\r\n,;]+", txt) if t and t.strip()]
+    return ", ".join(parts)
 
 
 @app.get("/api/events/{event_id}/overview")
